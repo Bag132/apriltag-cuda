@@ -72,6 +72,7 @@ void image_u8_gaussian_blur(image_u8_t *im, double sigma, int k);
 
 // 1.5, 2, 3, 4, ... supported
 image_u8_t *image_u8_decimate(image_u8_t *im, float factor);
+image_u8_t *image_u8_decimate_cuda(image_u8_t *im, float ffactor, uint8_t *dev_img);
 
 void image_u8_destroy(image_u8_t *im);
 

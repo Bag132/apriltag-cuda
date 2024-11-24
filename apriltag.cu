@@ -159,7 +159,7 @@ static void quad_destroy(struct quad *quad)
 
 static struct quad *quad_copy(struct quad *quad)
 {
-    struct quad *q = calloc(1, sizeof(struct quad));
+    struct quad *q = (struct quad *) calloc(1, sizeof(struct quad));
     memcpy(q, quad, sizeof(struct quad));
     if (quad->H)
         q->H = matd_copy(quad->H);
@@ -197,7 +197,7 @@ static void quick_decode_init(apriltag_family_t *family, int maxhamming)
     assert(family->impl == NULL);
     assert(family->ncodes < 65536);
 
-    struct quick_decode *qd = calloc(1, sizeof(struct quick_decode));
+    struct quick_decode *qd = (struct quick_decode *) calloc(1, sizeof(struct quick_decode));
     int capacity = family->ncodes;
 
     int nbits = family->nbits;
@@ -216,7 +216,7 @@ static void quick_decode_init(apriltag_family_t *family, int maxhamming)
 //    debug_print("capacity %d, size: %.0f kB\n",
 //           capacity, qd->nentries * sizeof(struct quick_decode_entry) / 1024.0);
 
-    qd->entries = calloc(qd->nentries, sizeof(struct quick_decode_entry));
+    qd->entries = (quick_decode_entry *) calloc(qd->nentries, sizeof(struct quick_decode_entry));
     if (qd->entries == NULL) {
         debug_print("Failed to allocate hamming decode table\n");
         // errno already set to ENOMEM (Error No MEMory) by calloc() failure
@@ -398,8 +398,13 @@ void apriltag_detector_destroy(apriltag_detector_t *td)
 
 struct quad_decode_task
 {
+    // i0: chunk start
+    // i1: chunk end
     int i0, i1;
+
+    // idk
     zarray_t *quads;
+
     apriltag_detector_t *td;
 
     image_u8_t *im;
@@ -481,7 +486,8 @@ static matd_t* homography_compute2(double c[4][4]) {
         }
         A[col*9 + 8] = (A[col*9 + 8] - sum)/A[col*9 + col];
     }
-    return matd_create_data(3, 3, (double[]) { A[8], A[17], A[26], A[35], A[44], A[53], A[62], A[71], 1 });
+    double data[] = { A[8], A[17], A[26], A[35], A[44], A[53], A[62], A[71], 1 };
+    return matd_create_data(3, 3, data);
 }
 
 // returns non-zero if an error occurs (i.e., H has no inverse)
@@ -534,7 +540,7 @@ static double value_for_pixel(image_u8_t *im, double px, double py) {
 }
 
 static void sharpen(apriltag_detector_t* td, double* values, int size) {
-    double *sharpened = malloc(sizeof(double)*size*size);
+    double *sharpened = (double *) malloc(sizeof(double)*size*size);
     double kernel[9] = {
         0, -1, 0,
         -1, 4, -1,
@@ -683,7 +689,7 @@ static float quad_decode(apriltag_detector_t* td, apriltag_family_t *family, ima
     float black_score = 0, white_score = 0;
     float black_score_count = 1, white_score_count = 1;
 
-    double *values = calloc(family->total_width*family->total_width, sizeof(double));
+    double *values = (double *) calloc(family->total_width*family->total_width, sizeof(double));
 
     int min_coord = (family->width_at_border - family->total_width)/2;
     for (uint32_t i = 0; i < family->nbits; i++) {
@@ -915,6 +921,7 @@ static void refine_edges(apriltag_detector_t *td, image_u8_t *im_orig, struct qu
     }
 }
 
+
 static void quad_decode_task(void *_u)
 {
     struct quad_decode_task *task = (struct quad_decode_task*) _u;
@@ -953,7 +960,7 @@ static void quad_decode_task(void *_u)
             float decision_margin = quad_decode(td, family, im, quad, &entry, task->im_samples);
 
             if (decision_margin >= 0 && entry.hamming < 255) {
-                apriltag_detection_t *det = calloc(1, sizeof(apriltag_detection_t));
+                apriltag_detection_t *det = (apriltag_detection_t *) calloc(1, sizeof(apriltag_detection_t));
 
                 det->family = family;
                 det->id = entry.id;
@@ -1026,6 +1033,32 @@ static int prefer_smaller(int pref, double q0, double q1)
     return 0;
 }
 
+void print_img(uint8_t *buf, uint32_t length, const char* name)
+{
+    printf("uint8_t %s[] = { ", name);
+    for (uint32_t i = 0; i < length - 1; i++) {
+        printf("%u, ", buf[i]);
+    }
+    if (length == 0) {
+        printf("};\n");
+    } else {
+        printf("%u };\n", buf[length - 1]);
+    }
+}
+
+uint8_t QUAD_IM_AFTER_DECIMATE[] = { 97, 110, 101, 108, 109, 119, 111, 121, 120, 121, 122, 115, 120, 124, 121, 127, 130, 124, 112, 116, 115, 78, 61, 60, 85, 60, 90, 92, 92, 98, 101, 103, 100, 101, 103, 105, 108, 93, 112, 104, 104, 99, 100, 102, 103, 101, 101, 104, 109, 104, 105, 102, 96, 102, 103, 104, 102, 106, 113, 106, 103, 102, 96, 109, 101, 110, 103, 101, 115, 112, 95, 126, 110, 109, 111, 117, 96, 106, 111, 102, 106, 124, 114, 111, 113, 118, 109, 108, 109, 116, 118, 109, 116, 109, 115, 110, 120, 114, 117, 110 };
+
+bool buffers_equal(uint8_t *buf1, uint8_t *buf2, uint32_t len) 
+{
+    for (uint32_t i = 0; i < len; i++) {
+        if (buf1[i] != buf2[i]) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 zarray_t *apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig)
 {
     if (zarray_size(td->tag_families) == 0) {
@@ -1055,6 +1088,8 @@ zarray_t *apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig)
 
         timeprofile_stamp(td->tp, "decimate");
     }
+
+    print_img(quad_im->buf, 100, "QUAD_IM_AFTER_DECIMATE");
 
     if (td->quad_sigma != 0) {
         // compute a reasonable kernel width by figuring that the
@@ -1162,7 +1197,7 @@ zarray_t *apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig)
 
         int chunksize = 1 + zarray_size(quads) / (APRILTAG_TASKS_PER_THREAD_TARGET * td->nthreads);
 
-        struct quad_decode_task *tasks = malloc(sizeof(struct quad_decode_task)*(zarray_size(quads) / chunksize + 1));
+        struct quad_decode_task *tasks = (struct quad_decode_task*) malloc(sizeof(struct quad_decode_task)*(zarray_size(quads) / chunksize + 1));
 
         int ntasks = 0;
         for (int i = 0; i < zarray_size(quads); i+= chunksize) {
@@ -1361,9 +1396,10 @@ zarray_t *apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig)
 
             for (int j = 0; j < 4; j++) {
                 int k = (j + 1) & 3;
+                uint8_t color[] = { rgb[0], rgb[1], rgb[2] };
                 image_u8x3_draw_line(out,
                                      det->p[j][0], det->p[j][1], det->p[k][0], det->p[k][1],
-                                     (uint8_t[]) { rgb[0], rgb[1], rgb[2] });
+                                     color);
             }
         }
 
@@ -1431,6 +1467,407 @@ zarray_t *apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig)
     return detections;
 }
 
+__global__ void detect_cuda(apriltag_detector *td, image_u8_t *im_orig, uint8_t *dev_img) 
+{
+    
+}
+
+__global__ void quad_decode_task_cuda(int32_t chunk_start, int32_t chunk_end, struct quad *quads, 
+                                        uint8_t *img_buf, uint32_t img_width, uint32_t img_height)
+{
+    // for (int quadidx = chunk_start; quadidx < chunk_end; quadidx++) {
+    //     struct quad *quad_original = ;
+
+    // }
+}
+
+__global__ void detect(uint8_t *img_buf, uint32_t img_width, uint32_t img_height, uint32_t img_stride, float quad_decimate, float quad_sigma, bool refine_edges)
+{
+
+}
+
+zarray_t *apriltag_detector_detect_cuda_inline(apriltag_detector_t *td, image_u8_t *im_orig, uint8_t *dev_img)
+{
+
+    detect<<<1, 10>>>(dev_img, im_orig->width, im_orig->height, im_orig->stride, td->quad_decimate, td->quad_sigma, td->refine_edges);
+}
+
+
+zarray_t *apriltag_detector_detect_cuda(apriltag_detector_t *td, image_u8_t *im_orig, uint8_t *dev_img)
+{
+    if (zarray_size(td->tag_families) == 0) {
+        zarray_t *s = zarray_create(sizeof(apriltag_detection_t*));
+        debug_print("No tag families enabled\n");
+        return s;
+    }
+
+    if (td->wp == NULL || td->nthreads != workerpool_get_nthreads(td->wp)) {
+        workerpool_destroy(td->wp);
+        td->wp = workerpool_create(td->nthreads);
+        if (td->wp == NULL) {
+            // creating workerpool failed - return empty zarray
+            return zarray_create(sizeof(apriltag_detection_t*));
+        }
+    }
+
+    timeprofile_clear(td->tp);
+    timeprofile_stamp(td->tp, "init");
+
+    ///////////////////////////////////////////////////////////
+    // Step 1. Detect quads according to requested image decimation
+    // and blurring parameters.
+    image_u8_t *quad_im = im_orig;
+    if (td->quad_decimate > 1) {
+        quad_im = image_u8_decimate(im_orig, td->quad_decimate);
+
+        timeprofile_stamp(td->tp, "decimate");
+    }
+
+    if (td->quad_sigma != 0) {
+        // compute a reasonable kernel width by figuring that the
+        // kernel should go out 2 std devs.
+        //
+        // max sigma          ksz
+        // 0.499              1  (disabled)
+        // 0.999              3
+        // 1.499              5
+        // 1.999              7
+
+        float sigma = fabsf((float) td->quad_sigma);
+
+        int ksz = 4 * sigma; // 2 std devs in each direction
+        if ((ksz & 1) == 0)
+            ksz++;
+
+        if (ksz > 1) {
+
+            if (td->quad_sigma > 0) {
+                // Apply a blur
+                image_u8_gaussian_blur(quad_im, sigma, ksz);
+            } else {
+                // SHARPEN the image by subtracting the low frequency components.
+                image_u8_t *orig = image_u8_copy(quad_im);
+                image_u8_gaussian_blur(quad_im, sigma, ksz);
+
+                for (int y = 0; y < orig->height; y++) {
+                    for (int x = 0; x < orig->width; x++) {
+                        int vorig = orig->buf[y*orig->stride + x];
+                        int vblur = quad_im->buf[y*quad_im->stride + x];
+
+                        int v = 2*vorig - vblur;
+                        if (v < 0)
+                            v = 0;
+                        if (v > 255)
+                            v = 255;
+
+                        quad_im->buf[y*quad_im->stride + x] = (uint8_t) v;
+                    }
+                }
+                image_u8_destroy(orig);
+            }
+        }
+    }
+
+    timeprofile_stamp(td->tp, "blur/sharp");
+
+    zarray_t *quads = apriltag_quad_thresh(td, quad_im);
+
+    // adjust centers of pixels so that they correspond to the
+    // original full-resolution image.
+    if (td->quad_decimate > 1) {
+        for (int i = 0; i < zarray_size(quads); i++) {
+            struct quad *q;
+            zarray_get_volatile(quads, i, &q);
+
+            for (int j = 0; j < 4; j++) {
+                q->p[j][0] *= td->quad_decimate;
+                q->p[j][1] *= td->quad_decimate;
+            }
+        }
+    }
+
+    if (quad_im != im_orig)
+        image_u8_destroy(quad_im);
+
+    zarray_t *detections = zarray_create(sizeof(apriltag_detection_t*));
+
+    td->nquads = zarray_size(quads);
+
+    timeprofile_stamp(td->tp, "quads");
+
+    ////////////////////////////////////////////////////////////////
+    // Step 2. Decode tags from each quad.
+    if (1) {
+        image_u8_t *im_samples = td->debug ? image_u8_copy(im_orig) : NULL;
+
+        int chunksize = 1 + zarray_size(quads) / (APRILTAG_TASKS_PER_THREAD_TARGET * td->nthreads);
+
+        struct quad_decode_task *tasks = (struct quad_decode_task*) malloc(sizeof(struct quad_decode_task)*(zarray_size(quads) / chunksize + 1));
+
+        int ntasks = 0;
+        for (int i = 0; i < zarray_size(quads); i+= chunksize) {
+            tasks[ntasks].i0 = i;
+            tasks[ntasks].i1 = imin(zarray_size(quads), i + chunksize);
+            tasks[ntasks].quads = quads;
+            tasks[ntasks].td = td;
+            tasks[ntasks].im = im_orig;
+            tasks[ntasks].detections = detections;
+
+            tasks[ntasks].im_samples = im_samples;
+
+            workerpool_add_task(td->wp, quad_decode_task, &tasks[ntasks]);
+            ntasks++;
+        }
+
+        workerpool_run(td->wp);
+
+        free(tasks);
+
+        if (im_samples != NULL) {
+            image_u8_write_pnm(im_samples, "debug_samples.pnm");
+            image_u8_destroy(im_samples);
+        }
+    }
+
+    timeprofile_stamp(td->tp, "decode+refinement");
+
+    ////////////////////////////////////////////////////////////////
+    // Step 3. Reconcile detections--- don't report the same tag more
+    // than once. (Allow non-overlapping duplicate detections.)
+    if (1) {
+        zarray_t *poly0 = g2d_polygon_create_zeros(4);
+        zarray_t *poly1 = g2d_polygon_create_zeros(4);
+
+        for (int i0 = 0; i0 < zarray_size(detections); i0++) {
+
+            apriltag_detection_t *det0;
+            zarray_get(detections, i0, &det0);
+
+            for (int k = 0; k < 4; k++)
+                zarray_set(poly0, k, det0->p[k], NULL);
+
+            for (int i1 = i0+1; i1 < zarray_size(detections); i1++) {
+
+                apriltag_detection_t *det1;
+                zarray_get(detections, i1, &det1);
+
+                if (det0->id != det1->id || det0->family != det1->family)
+                    continue;
+
+                for (int k = 0; k < 4; k++)
+                    zarray_set(poly1, k, det1->p[k], NULL);
+
+                if (g2d_polygon_overlaps_polygon(poly0, poly1)) {
+                    // the tags overlap. Delete one, keep the other.
+
+                    int pref = 0; // 0 means undecided which one we'll keep.
+                    pref = prefer_smaller(pref, det0->hamming, det1->hamming);     // want small hamming
+                    pref = prefer_smaller(pref, -det0->decision_margin, -det1->decision_margin);      // want bigger margins
+
+                    // if we STILL don't prefer one detection over the other, then pick
+                    // any deterministic criterion.
+                    for (int i = 0; i < 4; i++) {
+                        pref = prefer_smaller(pref, det0->p[i][0], det1->p[i][0]);
+                        pref = prefer_smaller(pref, det0->p[i][1], det1->p[i][1]);
+                    }
+
+                    if (pref == 0) {
+                        // at this point, we should only be undecided if the tag detections
+                        // are *exactly* the same. How would that happen?
+                        debug_print("uh oh, no preference for overlappingdetection\n");
+                    }
+
+                    if (pref < 0) {
+                        // keep det0, destroy det1
+                        apriltag_detection_destroy(det1);
+                        zarray_remove_index(detections, i1, 1);
+                        i1--; // retry the same index
+                        goto retry1;
+                    } else {
+                        // keep det1, destroy det0
+                        apriltag_detection_destroy(det0);
+                        zarray_remove_index(detections, i0, 1);
+                        i0--; // retry the same index.
+                        goto retry0;
+                    }
+                }
+
+              retry1: ;
+            }
+
+          retry0: ;
+        }
+
+        zarray_destroy(poly0);
+        zarray_destroy(poly1);
+    }
+
+    timeprofile_stamp(td->tp, "reconcile");
+
+    ////////////////////////////////////////////////////////////////
+    // Produce final debug output
+    // deallocate
+    timeprofile_stamp(td->tp, "debug output");
+
+    for (int i = 0; i < zarray_size(quads); i++) {
+        struct quad *quad;
+        zarray_get_volatile(quads, i, &quad);
+        matd_destroy(quad->H);
+        matd_destroy(quad->Hinv);
+    }
+
+    zarray_destroy(quads);
+
+    zarray_sort(detections, detection_compare_function);
+    timeprofile_stamp(td->tp, "cleanup");
+
+    return detections;
+
+}
+
+zarray_t *apriltag_detector_detect_cuda_old(apriltag_detector_t *td, image_u8_t *im_orig, uint8_t *dev_img)
+{
+    ///////////////////////////////////////////////////////////
+    // Step 1. Detect quads according to requested image decimation
+    // and blurring parameters.
+    
+    image_u8_t *quad_im = im_orig;
+    // TODO: Quad decimate
+    // TODO: Quad sigma
+
+    zarray_t *quads = (zarray_t *) apriltag_quad_thresh(td, quad_im);
+
+    // TODO: Decimate re-map pixels
+
+    if (quad_im != im_orig)
+        image_u8_destroy(quad_im);
+
+    zarray_t *detections = zarray_create(sizeof(apriltag_detection_t*));
+
+    td->nquads = zarray_size(quads);
+
+    ////////////////////////////////////////////////////////////////
+    // Step 2. Decode tags from each quad.
+    if (1) {
+        image_u8_t *im_samples = td->debug ? image_u8_copy(im_orig) : NULL;
+
+        int chunksize = 1 + zarray_size(quads) / (APRILTAG_TASKS_PER_THREAD_TARGET * td->nthreads);
+
+        struct quad_decode_task *tasks = (struct quad_decode_task*) malloc(sizeof(struct quad_decode_task)*(zarray_size(quads) / chunksize + 1));
+
+        int ntasks = 0;
+        for (int i = 0; i < zarray_size(quads); i+= chunksize) {
+            tasks[ntasks].i0 = i;
+            tasks[ntasks].i1 = imin(zarray_size(quads), i + chunksize);
+            tasks[ntasks].quads = quads;
+            tasks[ntasks].td = td;
+            tasks[ntasks].im = im_orig;
+            tasks[ntasks].detections = detections;
+
+            tasks[ntasks].im_samples = im_samples;
+
+            workerpool_add_task(td->wp, quad_decode_task, &tasks[ntasks]);
+            ntasks++;
+        }
+
+        workerpool_run(td->wp);
+
+        free(tasks);
+
+        if (im_samples != NULL) {
+            image_u8_write_pnm(im_samples, "debug_samples.pnm");
+            image_u8_destroy(im_samples);
+        }
+    }
+
+
+    ////////////////////////////////////////////////////////////////
+    // Step 3. Reconcile detections--- don't report the same tag more
+    // than once. (Allow non-overlapping duplicate detections.)
+    
+    zarray_t *poly0 = g2d_polygon_create_zeros(4);
+    zarray_t *poly1 = g2d_polygon_create_zeros(4);
+
+    for (int i0 = 0; i0 < zarray_size(detections); i0++) {
+
+        apriltag_detection_t *det0;
+        zarray_get(detections, i0, &det0);
+
+        for (int k = 0; k < 4; k++)
+            zarray_set(poly0, k, det0->p[k], NULL);
+
+        for (int i1 = i0+1; i1 < zarray_size(detections); i1++) {
+
+            apriltag_detection_t *det1;
+            zarray_get(detections, i1, &det1);
+
+            if (det0->id != det1->id || det0->family != det1->family)
+                continue;
+
+            for (int k = 0; k < 4; k++)
+                zarray_set(poly1, k, det1->p[k], NULL);
+
+            if (g2d_polygon_overlaps_polygon(poly0, poly1)) {
+                // the tags overlap. Delete one, keep the other.
+
+                int pref = 0; // 0 means undecided which one we'll keep.
+                pref = prefer_smaller(pref, det0->hamming, det1->hamming);     // want small hamming
+                pref = prefer_smaller(pref, -det0->decision_margin, -det1->decision_margin);      // want bigger margins
+
+                // if we STILL don't prefer one detection over the other, then pick
+                // any deterministic criterion.
+                for (int i = 0; i < 4; i++) {
+                    pref = prefer_smaller(pref, det0->p[i][0], det1->p[i][0]);
+                    pref = prefer_smaller(pref, det0->p[i][1], det1->p[i][1]);
+                }
+
+                if (pref == 0) {
+                    // at this point, we should only be undecided if the tag detections
+                    // are *exactly* the same. How would that happen?
+                    debug_print("uh oh, no preference for overlappingdetection\n");
+                }
+
+                if (pref < 0) {
+                    // keep det0, destroy det1
+                    apriltag_detection_destroy(det1);
+                    zarray_remove_index(detections, i1, 1);
+                    i1--; // retry the same index
+                    goto retry1;
+                } else {
+                    // keep det1, destroy det0
+                    apriltag_detection_destroy(det0);
+                    zarray_remove_index(detections, i0, 1);
+                    i0--; // retry the same index.
+                    goto retry0;
+                }
+            }
+
+            retry1: ;
+        }
+
+        retry0: ;
+    }
+
+    zarray_destroy(poly0);
+    zarray_destroy(poly1);
+    
+    // deallocate
+
+    for (int i = 0; i < zarray_size(quads); i++) {
+        struct quad *quad;
+        zarray_get_volatile(quads, i, &quad);
+        matd_destroy(quad->H);
+        matd_destroy(quad->Hinv);
+    }
+
+    zarray_destroy(quads);
+
+    zarray_sort(detections, detection_compare_function);
+    timeprofile_stamp(td->tp, "cleanup");
+
+    return detections;
+
+}
 
 // Call this method on each of the tags returned by apriltag_detector_detect
 void apriltag_detections_destroy(zarray_t *detections)

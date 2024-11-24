@@ -30,6 +30,12 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <chrono>
+#include <cuda_runtime.h>
+
+// includes, project
+// #include "helper_cuda.h"
+// #include "helper_functions.h" // helper functions for SDK examples
 
 #include "common/image_u8.h"
 #include "common/pnm.h"
@@ -39,14 +45,15 @@ either expressed or implied, of the Regents of The University of Michigan.
 // needed for RGB in 8-wide vector processing)
 #define DEFAULT_ALIGNMENT_U8 96
 
+// TODO: CUDA Maybe?
 image_u8_t *image_u8_create_stride(unsigned int width, unsigned int height, unsigned int stride)
 {
-    uint8_t *buf = calloc(height*stride, sizeof(uint8_t));
+    uint8_t *buf = (uint8_t *) calloc(height*stride, sizeof(uint8_t));
 
     // const initializer
     image_u8_t tmp = { .width = width, .height = height, .stride = stride, .buf = buf };
 
-    image_u8_t *im = calloc(1, sizeof(image_u8_t));
+    image_u8_t *im = (image_u8_t *) calloc(1, sizeof(image_u8_t));
     memcpy(im, &tmp, sizeof(image_u8_t));
     return im;
 }
@@ -68,13 +75,13 @@ image_u8_t *image_u8_create_alignment(unsigned int width, unsigned int height, u
 
 image_u8_t *image_u8_copy(const image_u8_t *in)
 {
-    uint8_t *buf = malloc(in->height*in->stride*sizeof(uint8_t));
+    uint8_t *buf = (uint8_t *) malloc(in->height*in->stride*sizeof(uint8_t));
     memcpy(buf, in->buf, in->height*in->stride*sizeof(uint8_t));
 
     // const initializer
     image_u8_t tmp = { .width = in->width, .height = in->height, .stride = in->stride, .buf = buf };
 
-    image_u8_t *copy = calloc(1, sizeof(image_u8_t));
+    image_u8_t *copy = (image_u8_t *) calloc(1, sizeof(image_u8_t));
     memcpy(copy, &tmp, sizeof(image_u8_t));
     return copy;
 }
@@ -323,7 +330,7 @@ void image_u8_convolve_2D(image_u8_t *im, const uint8_t *k, int ksz)
 
     for (int y = 0; y < im->height; y++) {
 
-        uint8_t *x = malloc(sizeof(uint8_t)*im->stride);
+        uint8_t *x = (uint8_t *) malloc(sizeof(uint8_t)*im->stride);
         memcpy(x, &im->buf[y*im->stride], im->stride);
 
         convolve(x, &im->buf[y*im->stride], im->width, k, ksz);
@@ -331,8 +338,8 @@ void image_u8_convolve_2D(image_u8_t *im, const uint8_t *k, int ksz)
     }
 
     for (int x = 0; x < im->width; x++) {
-        uint8_t *xb = malloc(sizeof(uint8_t)*im->height);
-        uint8_t *yb = malloc(sizeof(uint8_t)*im->height);
+        uint8_t *xb = (uint8_t *) malloc(sizeof(uint8_t)*im->height);
+        uint8_t *yb = (uint8_t *) malloc(sizeof(uint8_t)*im->height);
 
         for (int y = 0; y < im->height; y++)
             xb[y] = im->buf[y*im->stride + x];
@@ -354,7 +361,7 @@ void image_u8_gaussian_blur(image_u8_t *im, double sigma, int ksz)
     assert((ksz & 1) == 1); // ksz must be odd.
 
     // build the kernel.
-    double *dk = malloc(sizeof(double)*ksz);
+    double *dk = (double*)malloc(sizeof(double)*ksz);
 
     // for kernel of length 5:
     // dk[0] = f(-2), dk[1] = f(-1), dk[2] = f(0), dk[3] = f(1), dk[4] = f(2)
@@ -372,7 +379,7 @@ void image_u8_gaussian_blur(image_u8_t *im, double sigma, int ksz)
     for (int i = 0; i < ksz; i++)
         dk[i] /= acc;
 
-    uint8_t *k = malloc(sizeof(uint8_t)*ksz);
+    uint8_t *k = (uint8_t *) malloc(sizeof(uint8_t)*ksz);
     for (int i = 0; i < ksz; i++)
         k[i] = dk[i]*255;
 
@@ -436,6 +443,39 @@ image_u8_t *image_u8_rotate(const image_u8_t *in, double rad, uint8_t pad)
     return out;
 }
 
+__global__ void decimate_worker(uint8_t *img, uint8_t *decim , uint32_t chunk_size, uint32_t img_width, uint32_t img_height, uint32_t img_stride, uint32_t decim_stride, int32_t factor)
+{
+    if (threadIdx.x == 0) {
+        // printf("chunk_size: %u, img_width: %u, img_height: %u, img_stride: %u, decim_stride: %u, factor: %d, count: %u\n",
+        //         chunk_size, img_width, img_height, img_stride, decim_stride, factor, *count);
+    }
+    uint32_t img_size_p = img_width * img_height;
+    uint32_t img_size_b = img_size_p;
+    uint32_t chunk_size_b = chunk_size;
+
+    uint32_t start_b = threadIdx.x * chunk_size;
+    // printf("Start_b = %u, thread = %d\n", start_b, threadIdx.x);
+
+    uint32_t end_b = start_b + chunk_size_b;
+    end_b = end_b > img_size_b ? img_size_b : end_b;
+    int swidth = 1 + (img_width - 1) / factor;
+    int sheight = 1 + (img_height - 1) / factor;
+    // Change x and y to start_b end_b
+    uint32_t sy = 0;
+    for (uint32_t y = 0; y < img_height; y += factor) {
+        // printf("sy: %d\n", sy);
+        uint32_t sx = 0;
+        for (uint32_t x = 0; x < img_width; x += factor) {
+            // printf("sx: %d, decim[%d] img[%d]\n", sx, sy * decim_stride + sx, y * img_stride + x);
+            decim[sy * decim_stride + sx] = img[y * img_stride + x];
+            // decim[sy * decim_stride + sx] = 2;
+            ++sx;
+        }
+        ++sy;
+    }
+
+}
+
 image_u8_t *image_u8_decimate(image_u8_t *im, float ffactor)
 {
     int width = im->width, height = im->height;
@@ -491,6 +531,10 @@ image_u8_t *image_u8_decimate(image_u8_t *im, float ffactor)
     int swidth = 1 + (width - 1)/factor;
     int sheight = 1 + (height - 1)/factor;
     image_u8_t *decim = image_u8_create(swidth, sheight);
+
+
+    // auto start = std::chrono::high_resolution_clock::now();
+
     int sy = 0;
     for (int y = 0; y < height; y += factor) {
         int sx = 0;
@@ -500,6 +544,100 @@ image_u8_t *image_u8_decimate(image_u8_t *im, float ffactor)
         }
         sy++;
     }
+    // auto end = std::chrono::high_resolution_clock::now();
+    // auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    // printf("CPU decimate: %fms\n", elapsed.count() / 1000000.);
+
+    return decim;
+}
+
+image_u8_t *image_u8_decimate_cuda(image_u8_t *im, float ffactor, uint8_t *dev_img)
+{
+    int width = im->width, height = im->height, img_size = width * height, img_len = img_size * sizeof(uint8_t);
+
+    if (ffactor == 1.5) {
+        int swidth = width / 3 * 2, sheight = height / 3 * 2;
+
+        image_u8_t *decim = image_u8_create(swidth, sheight);
+
+        int y = 0, sy = 0;
+        while (sy < sheight) {
+            int x = 0, sx = 0;
+            while (sx < swidth) {
+
+                // a b c
+                // d e f
+                // g h i
+                uint8_t a = im->buf[(y+0)*im->stride + (x+0)];
+                uint8_t b = im->buf[(y+0)*im->stride + (x+1)];
+                uint8_t c = im->buf[(y+0)*im->stride + (x+2)];
+
+                uint8_t d = im->buf[(y+1)*im->stride + (x+0)];
+                uint8_t e = im->buf[(y+1)*im->stride + (x+1)];
+                uint8_t f = im->buf[(y+1)*im->stride + (x+2)];
+
+                uint8_t g = im->buf[(y+2)*im->stride + (x+0)];
+                uint8_t h = im->buf[(y+2)*im->stride + (x+1)];
+                uint8_t i = im->buf[(y+2)*im->stride + (x+2)];
+
+                decim->buf[(sy+0)*decim->stride + (sx + 0)] =
+                    (4*a+2*b+2*d+e)/9;
+                decim->buf[(sy+0)*decim->stride + (sx + 1)] =
+                    (4*c+2*b+2*f+e)/9;
+
+                decim->buf[(sy+1)*decim->stride + (sx + 0)] =
+                    (4*g+2*d+2*h+e)/9;
+                decim->buf[(sy+1)*decim->stride + (sx + 1)] =
+                    (4*i+2*f+2*h+e)/9;
+
+                x += 3;
+                sx += 2;
+            }
+
+            y += 3;
+            sy += 2;
+        }
+
+        return decim;
+    }
+
+    int factor = (int) ffactor;
+
+    int swidth = 1 + (width - 1) / factor;
+    int sheight = 1 + (height - 1) / factor;
+    image_u8_t *decim = image_u8_create(swidth, sheight);
+    int sstride = decim->stride;
+    uint32_t decim_size = swidth * sheight, decim_len = decim_size * sizeof(uint8_t);
+
+    uint8_t *dev_decim;
+    
+    cudaError_t err;
+    if ((err = cudaMalloc(&dev_decim, decim_len)) != cudaSuccess) {
+        printf("Couldn't malloc decimated buffer: %u\n", err);
+        return NULL;
+    }
+
+    // cudaMemcpy(dev_img, im->buf, img_len, cudaMemcpyHostToDevice);
+    cudaMemcpy(dev_decim, decim->buf, decim_len, cudaMemcpyHostToDevice);
+
+    uint32_t count = 0;
+
+    dim3 threads(10, 1);
+
+    auto start = std::chrono::high_resolution_clock::now();
+    auto end = std::chrono::high_resolution_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+
+    start = std::chrono::high_resolution_clock::now();
+    decimate_worker<<<1, threads>>>(dev_img, dev_decim, img_size / threads.x, im->width, im->height, im->stride, sstride, ffactor);
+    end = std::chrono::high_resolution_clock::now();
+    elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    printf("GPU decimate: %fms\n", elapsed.count() / 1000000.);
+
+    cudaMemcpy(decim->buf, dev_decim, decim_len, cudaMemcpyDeviceToHost);
+
+    cudaFree(dev_decim);
+
     return decim;
 }
 
