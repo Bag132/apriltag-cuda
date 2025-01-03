@@ -28,14 +28,10 @@ either expressed or implied, of the Regents of The University of Michigan.
 #pragma once
 
 #include <stdint.h>
-#include "image_types.h"
+#include "image_types_cuda.cuh"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-typedef struct image_u8_lut image_u8_lut_t;
-struct image_u8_lut
+typedef struct image_u8_lut_cuda image_u8_lut_cuda_t;
+struct image_u8_lut_cuda
 {
     // When drawing, we compute the squared distance between a given pixel and a filled region.
     // int idx = squared_distance * scale;
@@ -50,41 +46,37 @@ struct image_u8_lut
 
 // Create or load an image. returns NULL on failure. Uses default
 // stride alignment.
-image_u8_t *image_u8_create_stride(unsigned int width, unsigned int height, unsigned int stride);
-image_u8_t *image_u8_create(unsigned int width, unsigned int height);
-image_u8_t *image_u8_create_alignment(unsigned int width, unsigned int height, unsigned int alignment);
-image_u8_t *image_u8_create_from_f32(image_f32_t *fim);
+__device__ image_u8_cuda_t *image_u8_create_stride_cuda(unsigned int width, unsigned int height, unsigned int stride);
+__device__ image_u8_cuda_t *image_u8_create_cuda(unsigned int width, unsigned int height);
+__device__ image_u8_cuda_t *image_u8_create_alignment_cuda(unsigned int width, unsigned int height, unsigned int alignment);
+// __device__ image_u8_cuda_t *image_u8_create_from_f32_cuda(image_f32_cuda_t *fim);
 
-image_u8_t *image_u8_create_from_pnm(const char *path);
-    image_u8_t *image_u8_create_from_pnm_alignment(const char *path, int alignment);
+// image_u8_t *image_u8_create_from_pnm(const char *path);
+//     image_u8_t *image_u8_create_from_pnm_alignment(const char *path, int alignment);
 
-image_u8_t *image_u8_copy(const image_u8_t *in);
-void image_u8_draw_line(image_u8_t *im, float x0, float y0, float x1, float y1, int v, int width);
-void image_u8_draw_circle(image_u8_t *im, float x0, float y0, float r, int v);
-void image_u8_draw_annulus(image_u8_t *im, float x0, float y0, float r0, float r1, int v);
+__device__ image_u8_cuda_t *image_u8_copy_cuda(const image_u8_cuda_t *in);
+__device__ void image_u8_draw_line_cuda(image_u8_cuda_t *im, float x0, float y0, float x1, float y1, int v, int width);
+__device__ void image_u8_draw_circle_cuda(image_u8_cuda_t *im, float x0, float y0, float r, int v);
+__device__ void image_u8_draw_annulus_cuda(image_u8_cuda_t *im, float x0, float y0, float r0, float r1, int v);
 
-void image_u8_fill_line_max(image_u8_t *im, const image_u8_lut_t *lut, const float *xy0, const float *xy1);
+__device__ void image_u8_fill_line_max_cuda(image_u8_cuda_t *im, const image_u8_lut_cuda_t *lut, const float *xy0, const float *xy1);
 
-void image_u8_clear(image_u8_t *im);
-void image_u8_darken(image_u8_t *im);
-void image_u8_convolve_2D(image_u8_t *im, const uint8_t *k, int ksz);
-void image_u8_gaussian_blur(image_u8_t *im, double sigma, int k);
+// __device__ void image_u8_clear_cuda(image_u8_cuda_t *im);
+__device__ void image_u8_darken_cuda(image_u8_cuda_t *im);
+__device__ void image_u8_convolve_2D_cuda(image_u8_cuda_t *im, const uint8_t *k, int ksz);
+__device__ void image_u8_gaussian_blur_cuda(image_u8_cuda_t *im, double sigma, int k);
 
 // 1.5, 2, 3, 4, ... supported
-image_u8_t *image_u8_decimate(image_u8_t *im, float factor);
+__device__ image_u8_cuda_t *image_u8_decimate_cuda(image_u8_cuda_t *im, float factor);
 
-void image_u8_destroy(image_u8_t *im);
+__device__ void image_u8_destroy_cuda(image_u8_cuda_t *im);
 
 // Write a pnm. Returns 0 on success
 // Currently only supports GRAY and RGBA. Does not write out alpha for RGBA
-int image_u8_write_pnm(const image_u8_t *im, const char *path);
+// __device__ int image_u8_write_pnm(const image_u8_t *im, const char *path);
 
 // rotate the image by 'rad' radians. (Rotated in the "intuitive
 // sense", i.e., if Y were up. When input values are unavailable, the
 // value 'pad' is inserted instead. The geometric center of the output
 // image corresponds to the geometric center of the input image.
-image_u8_t *image_u8_rotate(const image_u8_t *in, double rad, uint8_t pad);
-
-#ifdef __cplusplus
-}
-#endif
+__device__ image_u8_cuda_t *image_u8_rotate_cuda(const image_u8_cuda_t *in, double rad, uint8_t pad);

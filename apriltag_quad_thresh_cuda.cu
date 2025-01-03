@@ -39,920 +39,20 @@ either expressed or implied, of the Regents of The University of Michigan.
 // #include "zmaxheap.h"
 // #include "debug_print.h"
 
-// #include "apriltag.h"
-// #include "common/image_u8x3.h"
-// #include "common/zarray_cuda.h"
-// #include "common/unionfind.h"
+#include "apriltag_cuda.cuh"
+#include "common/cuda/image_u8x3_cuda.cuh"
+#include "common/cuda/zarray_cuda.cuh"
+#include "common/cuda/unionfind_cuda.cuh"
 // #include "common/timeprofile.h"
-// #include "common/zmaxheap.h"
+#include "common/cuda/zmaxheap_cuda.cuh"
 // #include "common/postscript_utils.h"
-// #include "common/math_util.h"
+#include "common/cuda/math_util_cuda.cuh"
 
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// START Helper functions
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
+#include "common/cuda/cuda_helpers.cuh"
 
-#define qswap(A,B) { double temp = A; A = B; B = temp;}
-
-__device__ int partition_descending(double arr[], int low, int high) {
-
-    // Initialize pivot to be the first element
-    int p = arr[low];
-    int i = low;
-    int j = high;
-
-   while (i < j) {
-
-        // Find the first element smaller than
-        // or equal to the pivot (from the start)
-        while (arr[i] >= p && i <= high - 1) {
-            i++;
-        }
-
-        // Find the first element greater than
-        // the pivot (from the end)
-        while (arr[j] < p && j >= low + 1) {
-            j--;
-        }
-
-        // Swap the elements if indices have not crossed
-        if (i < j) {
-            qswap(arr[i], arr[j]);
-        }
-    }
-
-    qswap(arr[low], arr[j]);
-    return j;
-}
-
-__device__ void quick_sort_descending(double arr[], int low, int high) {
-    if (low < high) {
-
-        // call partition function to find Partition Index
-        int pi = partition_descending(arr, low, high);
-
-        // Recursively call quickSort() for left and right
-        // half based on Partition Index
-        quick_sort_descending(arr, low, pi - 1);
-        quick_sort_descending(arr, pi + 1, high);
-    }
-}
-
-__device__ static inline int imin(int a, int b)
-{
-    return (a < b) ? a : b;
-}
-
-__device__ static inline double sq(double v)
-{
-    return v * v;
-}
-
-__device__ void *calloc_cuda(size_t nmemb, size_t size)
-{
-    register uint8_t* mem = (uint8_t*) malloc(nmemb * size);
-    if (mem) {
-        for (int32_t i = 0; i < nmemb * size; i++) {
-            mem[i] = 0;
-        }
-    }
-    return mem;
-}
-
-__device__ void *realloc_cuda(void *old_ptr, size_t old_ptr_size, size_t size)
-{
-    register uint8_t *e;
-    e = (uint8_t*) malloc(size);
-    for (int i = 0; i < old_ptr_size; i++) {
-        e[i] = ((uint8_t*) old_ptr)[i];
-    }
-    free(old_ptr);
-
-    return (void *) e;
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// END Helper functions
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// START zarray_cuda.h CUDA version
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-typedef struct zarray_cuda zarray_cuda_t;
-struct zarray_cuda
-{
-    size_t el_sz; // size of each element
-
-    int size; // how many elements?
-    int alloc; // we've allocated storage for how many elements?
-    char *data;
-};
-
-__device__ inline uint32_t u64hash_2(uint64_t x) {
-    return (2654435761 * x) >> 32;
-}
-
-__device__ inline zarray_cuda_t *zarray_cuda_create_cuda(size_t el_sz)
-{
-    zarray_cuda_t *za = (zarray_cuda_t*) calloc_cuda(1, sizeof(zarray_cuda_t));
-    za->el_sz = el_sz;
-    return za;
-}
-
-__device__ inline void zarray_cuda_ensure_capacity_cuda(zarray_cuda_t *za, int capacity)
-{
-    assert(za != NULL);
-
-    if (capacity <= za->alloc)
-        return;
-
-    int32_t old_len = za->alloc;
-
-    while (za->alloc < capacity) {
-        za->alloc *= 2;
-        if (za->alloc < 8)
-            za->alloc = 8;
-    }
-
-    za->data = (char*) realloc_cuda(za->data, old_len * za->el_sz, za->alloc * za->el_sz);
-}
-
-__device__ inline void zarray_cuda_add_cuda(zarray_cuda_t *za, const void *p)
-{
-    zarray_cuda_ensure_capacity_cuda(za, za->size + 1);
-
-    memcpy(&za->data[za->size*za->el_sz], p, za->el_sz);
-    za->size++;
-}
-
-__device__ inline int zarray_cuda_size_cuda(const zarray_cuda_t *za)
-{
-    assert(za != NULL);
-
-    return za->size;
-}
-
-/**
- * Retrieves the element from the supplied array located at the zero-based
- * index of 'idx' and copies its value into the variable pointed to by the pointer
- * 'p'.
- */
-__device__ inline void zarray_cuda_get_cuda(const zarray_cuda_t *za, int idx, void *p)
-{
-    assert(za != NULL);
-    assert(p != NULL);
-    assert(idx >= 0);
-    assert(idx < za->size);
-
-    memcpy(p, &za->data[idx*za->el_sz], za->el_sz);
-}
-
-__device__ inline void zarray_cuda_get_volatile_cuda(const zarray_cuda_t *za, int idx, void *p)
-{
-    assert(za != NULL);
-    assert(p != NULL);
-    assert(idx >= 0);
-    assert(idx < za->size);
-
-    *((void**) p) = &za->data[idx*za->el_sz];
-}
-
-__device__ inline void zarray_cuda_add_range_cuda(zarray_cuda_t *dest, const zarray_cuda_t *source, int start, int end)
-{
-    assert(dest->el_sz == source->el_sz);
-    assert(dest != NULL);
-    assert(source != NULL);
-    assert(start >= 0);
-    assert(end <= source->size);
-    if (start == end) {
-        return;
-    }
-    assert(start < end);
-
-    int count = end - start;
-    zarray_cuda_ensure_capacity_cuda(dest, dest->size + count);
-
-    memcpy(&dest->data[dest->size*dest->el_sz], &source->data[source->el_sz*start], dest->el_sz*count);
-    dest->size += count;
-}
-
-__device__ inline void zarray_cuda_destroy_cuda(zarray_cuda_t *za)
-{
-    if (za == NULL)
-        return;
-
-    if (za->data != NULL)
-        free(za->data);
-    memset(za, 0, sizeof(zarray_cuda_t));
-    free(za);
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// END zarray_cuda.h CUDA version
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// START zmaxheap.h CUDA version
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-#ifdef _WIN32
-static inline long int random(void)
-{
-        return rand();
-}
-#endif
-
-//                 0
-//         1               2
-//      3     4        5       6
-//     7 8   9 10    11 12   13 14
-//
-// Children of node i:  2*i+1, 2*i+2
-// Parent of node i: (i-1) / 2
-//
-// Heap property: a parent is greater than (or equal to) its children.
-
-#define MIN_CAPACITY 16
-
-typedef struct zmaxheap zmaxheap_t;
-
-typedef struct zmaxheap_iterator zmaxheap_iterator_t;
-struct zmaxheap_iterator {
-    zmaxheap_t *heap;
-    int in, out;
-};
-
-struct zmaxheap
-{
-    size_t el_sz;
-
-    int size;
-    int alloc;
-
-    float *values;
-    char *data;
-
-    void (*swap)(zmaxheap_t *heap, int a, int b);
-};
-
-__device__ inline void swap_default_cuda(zmaxheap_t *heap, int a, int b)
-{
-    float t = heap->values[a];
-    heap->values[a] = heap->values[b];
-    heap->values[b] = t;
-
-    char *tmp = (char *) malloc(sizeof(char)*heap->el_sz);
-    memcpy(tmp, &heap->data[a*heap->el_sz], heap->el_sz);
-    memcpy(&heap->data[a*heap->el_sz], &heap->data[b*heap->el_sz], heap->el_sz);
-    memcpy(&heap->data[b*heap->el_sz], tmp, heap->el_sz);
-    free(tmp);
-}
-
-__device__ inline void swap_pointer_cuda(zmaxheap_t *heap, int a, int b)
-{
-    float t = heap->values[a];
-    heap->values[a] = heap->values[b];
-    heap->values[b] = t;
-
-    void **pp = (void**) heap->data;
-    void *tmp = pp[a];
-    pp[a] = pp[b];
-    pp[b] = tmp;
-}
-
-
-__device__ zmaxheap_t *zmaxheap_create_cuda(size_t el_sz)
-{
-    zmaxheap_t *heap =(zmaxheap *) calloc_cuda(1, sizeof(zmaxheap_t));
-    heap->el_sz = el_sz;
-
-    heap->swap = swap_default_cuda;
-
-    if (el_sz == sizeof(void*))
-        heap->swap = swap_pointer_cuda;
-
-    return heap;
-}
-
-__device__ void zmaxheap_destroy_cuda(zmaxheap_t *heap)
-{
-    free(heap->values);
-    free(heap->data);
-    memset(heap, 0, sizeof(zmaxheap_t));
-    free(heap);
-}
-
-__device__ int zmaxheap_size_cuda(zmaxheap_t *heap)
-{
-    return heap->size;
-}
-
-__device__ void zmaxheap_ensure_capacity_cuda(zmaxheap_t *heap, int capacity)
-{
-    if (heap->alloc >= capacity)
-        return;
-
-    int newcap = heap->alloc;
-    int32_t old_len = newcap;
-    while (newcap < capacity) {
-        if (newcap < MIN_CAPACITY) {
-            newcap = MIN_CAPACITY;
-            continue;
-        }
-
-        newcap *= 2;
-    }
-
-    heap->values = (float *) realloc_cuda(heap->values, old_len * sizeof(float), newcap * sizeof(float));
-    heap->data = (char *) realloc_cuda(heap->data, old_len * heap->el_sz, newcap * heap->el_sz);
-    heap->alloc = newcap;
-}
-
-__device__ void zmaxheap_add_cuda(zmaxheap_t *heap, void *p, float v)
-{
-
-    assert (isfinite(v) && "zmaxheap_add: Trying to add non-finite number to heap.  NaN's prohibited, could allow INF with testing");
-    zmaxheap_ensure_capacity_cuda(heap, heap->size + 1);
-
-    int idx = heap->size;
-
-    heap->values[idx] = v;
-    memcpy(&heap->data[idx*heap->el_sz], p, heap->el_sz);
-
-    heap->size++;
-
-    while (idx > 0) {
-
-        int parent = (idx - 1) / 2;
-
-        // we're done!
-        if (heap->values[parent] >= v)
-            break;
-
-        // else, swap and recurse upwards.
-        heap->swap(heap, idx, parent);
-        idx = parent;
-    }
-}
-
-__device__ void zmaxheap_vmap_cuda(zmaxheap_t *heap, void (*f)(void*))
-{
-    assert(heap != NULL);
-    assert(f != NULL);
-    assert(heap->el_sz == sizeof(void*));
-
-    for (int idx = 0; idx < heap->size; idx++) {
-        void *p = NULL;
-        memcpy(&p, &heap->data[idx*heap->el_sz], heap->el_sz);
-        if (p == NULL) {
-            printf("Warning: zmaxheap_vmap item %d is NULL\n", idx);
-        }
-        f(p);
-    }
-}
-
-// Removes the item in the heap at the given index.  Returns 1 if the
-// item existed. 0 Indicates an invalid idx (heap is smaller than
-// idx). This is mostly intended to be used by zmaxheap_remove_max.
-__device__ int zmaxheap_remove_index_cuda(zmaxheap_t *heap, int idx, void *p, float *v)
-{
-    if (idx >= heap->size)
-        return 0;
-
-    // copy out the requested element from the heap.
-    if (v != NULL)
-        *v = heap->values[idx];
-    if (p != NULL)
-        memcpy(p, &heap->data[idx*heap->el_sz], heap->el_sz);
-
-    heap->size--;
-
-    // If this element is already the last one, then there's nothing
-    // for us to do.
-    if (idx == heap->size)
-        return 1;
-
-    // copy last element to first element. (which probably upsets
-    // the heap property).
-    heap->values[idx] = heap->values[heap->size];
-    memcpy(&heap->data[idx*heap->el_sz], &heap->data[heap->el_sz * heap->size], heap->el_sz);
-
-    // now fix the heap. Note, as we descend, we're "pushing down"
-    // the same node the entire time. Thus, while the index of the
-    // parent might change, the parent_score doesn't.
-    int parent = idx;
-    float parent_score = heap->values[idx];
-
-    // descend, fixing the heap.
-    while (parent < heap->size) {
-
-        int left = 2*parent + 1;
-        int right = left + 1;
-
-//            assert(parent_score == heap->values[parent]);
-
-        float left_score = (left < heap->size) ? heap->values[left] : -INFINITY;
-        float right_score = (right < heap->size) ? heap->values[right] : -INFINITY;
-
-        // put the biggest of (parent, left, right) as the parent.
-
-        // already okay?
-        if (parent_score >= left_score && parent_score >= right_score)
-            break;
-
-        // if we got here, then one of the children is bigger than the parent.
-        if (left_score >= right_score) {
-            assert(left < heap->size);
-            heap->swap(heap, parent, left);
-            parent = left;
-        } else {
-            // right_score can't be less than left_score if right_score is -INFINITY.
-            assert(right < heap->size);
-            heap->swap(heap, parent, right);
-            parent = right;
-        }
-    }
-
-    return 1;
-}
-
-__device__ int zmaxheap_remove_max_cuda(zmaxheap_t *heap, void *p, float *v)
-{
-    return zmaxheap_remove_index_cuda(heap, 0, p, v);
-}
-
-__device__ void zmaxheap_iterator_init_cuda(zmaxheap_t *heap, zmaxheap_iterator_t *it)
-{
-    memset(it, 0, sizeof(zmaxheap_iterator_t));
-    it->heap = heap;
-    it->in = 0;
-    it->out = 0;
-}
-
-__device__ int zmaxheap_iterator_next_cuda(zmaxheap_iterator_t *it, void *p, float *v)
-{
-    zmaxheap_t *heap = it->heap;
-
-    if (it->in >= zmaxheap_size_cuda(heap))
-        return 0;
-
-    *v = heap->values[it->in];
-    memcpy(p, &heap->data[it->in*heap->el_sz], heap->el_sz);
-
-    if (it->in != it->out) {
-        heap->values[it->out] = heap->values[it->in];
-        memcpy(&heap->data[it->out*heap->el_sz], &heap->data[it->in*heap->el_sz], heap->el_sz);
-    }
-
-    it->in++;
-    it->out++;
-    return 1;
-}
-
-__device__ int zmaxheap_iterator_next_volatile_cuda(zmaxheap_iterator_t *it, void *p, float *v)
-{
-    zmaxheap_t *heap = it->heap;
-
-    if (it->in >= zmaxheap_size_cuda(heap))
-        return 0;
-
-    *v = heap->values[it->in];
-    *((void**) p) = &heap->data[it->in*heap->el_sz];
-
-    if (it->in != it->out) {
-        heap->values[it->out] = heap->values[it->in];
-        memcpy(&heap->data[it->out*heap->el_sz], &heap->data[it->in*heap->el_sz], heap->el_sz);
-    }
-
-    it->in++;
-    it->out++;
-    return 1;
-}
-
-__device__ void zmaxheap_iterator_remove_cuda(zmaxheap_iterator_t *it)
-{
-    it->out--;
-}
-
-__device__ void maxheapify_cuda(zmaxheap_t *heap, int parent)
-{
-    int left = 2*parent + 1;
-    int right = 2*parent + 2;
-
-    int betterchild = parent;
-
-    if (left < heap->size && heap->values[left] > heap->values[betterchild])
-        betterchild = left;
-    if (right < heap->size && heap->values[right] > heap->values[betterchild])
-        betterchild = right;
-
-    if (betterchild != parent) {
-        heap->swap(heap, parent, betterchild);
-        maxheapify_cuda(heap, betterchild);
-    }
-}
-
-__device__ void zmaxheap_iterator_finish_cuda(zmaxheap_iterator_t *it)
-{
-    // if nothing was removed, no work to do.
-    if (it->in == it->out)
-        return;
-
-    zmaxheap_t *heap = it->heap;
-
-    heap->size = it->out;
-
-    // restore heap property
-    for (int i = heap->size/2 - 1; i >= 0; i--)
-        maxheapify_cuda(heap, i);
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// END zmaxheap.h CUDA version
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// START unionfind.h CUDA version
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-
-typedef struct unionfind unionfind_t;
-
-struct unionfind
-{
-    uint32_t maxid;
-
-    // Parent node for each. Initialized to 0xffffffff
-    uint32_t *parent;
-
-    // The size of the tree excluding the root
-    uint32_t *size;
-};
-
-__device__ inline unionfind_t *unionfind_create_cuda(uint32_t maxid)
-{
-    unionfind_t *uf = (unionfind_t*) calloc_cuda(1, sizeof(unionfind_t));
-    uf->maxid = maxid;
-    uf->parent = (uint32_t *) malloc((maxid+1) * sizeof(uint32_t) * 2);
-    memset(uf->parent, 0xff, (maxid+1) * sizeof(uint32_t));
-    uf->size = uf->parent + (maxid+1);
-    memset(uf->size, 0, (maxid+1) * sizeof(uint32_t));
-    return uf;
-}
-
-__device__ inline void unionfind_destroy_cuda(unionfind_t *uf)
-{
-    free(uf->parent);
-    free(uf);
-}
-
-__device__ inline uint32_t unionfind_get_representative_cuda(unionfind_t *uf, uint32_t id)
-{
-    uint32_t root = uf->parent[id];
-    // unititialized node, so set to self
-    if (root == 0xffffffff) {
-        uf->parent[id] = id;
-        return id;
-    }
-
-    // chase down the root
-    while (uf->parent[root] != root) {
-        root = uf->parent[root];
-    }
-
-    // go back and collapse the tree.
-    while (uf->parent[id] != root) {
-        uint32_t tmp = uf->parent[id];
-        uf->parent[id] = root;
-        id = tmp;
-    }
-
-    return root;
-}
-
-__device__ inline uint32_t unionfind_get_set_size_cuda(unionfind_t *uf, uint32_t id)
-{
-    uint32_t repid = unionfind_get_representative_cuda(uf, id);
-    return uf->size[repid] + 1;
-}
-
-
-__device__ inline uint32_t unionfind_connect_cuda(unionfind_t *uf, uint32_t aid, uint32_t bid)
-{
-    uint32_t aroot = unionfind_get_representative_cuda(uf, aid);
-    uint32_t broot = unionfind_get_representative_cuda(uf, bid);
-
-    if (aroot == broot)
-        return aroot;
-
-    // we don't perform "union by rank", but we perform a similar
-    // operation (but probably without the same asymptotic guarantee):
-    // We join trees based on the number of *elements* (as opposed to
-    // rank) contained within each tree. I.e., we use size as a proxy
-    // for rank.  In my testing, it's often *faster* to use size than
-    // rank, perhaps because the rank of the tree isn't that critical
-    // if there are very few nodes in it.
-    uint32_t asize = uf->size[aroot] + 1;
-    uint32_t bsize = uf->size[broot] + 1;
-
-    // optimization idea: We could shortcut some or all of the tree
-    // that is grafted onto the other tree. Pro: those nodes were just
-    // read and so are probably in cache. Con: it might end up being
-    // wasted effort -- the tree might be grafted onto another tree in
-    // a moment!
-    if (asize > bsize) {
-        uf->parent[broot] = aroot;
-        uf->size[aroot] += bsize;
-        return aroot;
-    } else {
-        uf->parent[aroot] = broot;
-        uf->size[broot] += asize;
-        return broot;
-    }
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// END unionfind.h CUDA version
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// START image_u8.h CUDA version
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-
-typedef struct image_u8 image_u8_t;
-struct image_u8
-{
-    const int32_t width;
-    const int32_t height;
-    const int32_t stride;
-
-    uint8_t *buf;
-};
-
-__device__ image_u8_t *image_u8_create_stride_cuda(unsigned int width, unsigned int height, unsigned int stride)
-{
-    uint8_t *buf = (uint8_t *) calloc_cuda(height*stride, sizeof(uint8_t));
-
-    // const initializer
-    image_u8_t tmp = { .width = width, .height = height, .stride = stride, .buf = buf };
-
-    image_u8_t *im = (image_u8_t *) calloc_cuda(1, sizeof(image_u8_t));
-    memcpy(im, &tmp, sizeof(image_u8_t));
-    return im;
-}
-
-__device__ image_u8_t *image_u8_create_alignment_cuda(unsigned int width, unsigned int height, unsigned int alignment)
-{
-    int stride = width;
-
-    if ((stride % alignment) != 0)
-        stride += alignment - (stride % alignment);
-
-    return image_u8_create_stride_cuda(width, height, stride);
-}
-
-__device__ image_u8_t *image_u8_create_cuda(unsigned int width, unsigned int height)
-{
-    return image_u8_create_alignment_cuda(width, height, 96);
-}
-
-__device__ void image_u8_destroy_cuda(image_u8_t *im)
-{
-    if (!im)
-        return;
-
-    free(im->buf);
-    free(im);
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// END image_u8.h CUDA version
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 //
 // START apriltag.h CUDA version
-//
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-
-typedef struct timeprofile timeprofile_t;
-struct timeprofile
-{
-    int64_t utime;
-    zarray_cuda_t *stamps;
-};
-
-typedef struct
-{
-    unsigned int nrows, ncols;
-    double data[];
-//    double *data;
-} matd_t;
-
-
-struct quad
-{
-    float p[4][2]; // corners
-
-    bool reversed_border;
-
-    // H: tag coordinates ([-1,1] at the black corners) to pixels
-    // Hinv: pixels to tag
-    matd_t *H, *Hinv;
-};
-
-// Represents a tag family. Every tag belongs to a tag family. Tag
-// families are generated by the Java tool
-// april.tag.TagFamilyGenerator and can be converted to C using
-// april.tag.TagToC.
-typedef struct apriltag_family apriltag_family_t;
-struct apriltag_family
-{
-    // How many codes are there in this tag family?
-    uint32_t ncodes;
-
-    // The codes in the family.
-    uint64_t *codes;
-
-    int width_at_border;
-    int total_width;
-    bool reversed_border;
-
-    // The bit locations.
-    uint32_t nbits;
-    uint32_t *bit_x;
-    uint32_t *bit_y;
-
-    // minimum hamming distance between any two codes. (e.g. 36h11 => 11)
-    uint32_t h;
-
-    // a human-readable name, e.g., "tag36h11"
-    char *name;
-
-    // some detector implementations may preprocess codes in order to
-    // accelerate decoding.  They put their data here. (Do not use the
-    // same apriltag_family instance in more than one implementation)
-    void *impl;
-};
-
-
-struct apriltag_quad_thresh_params
-{
-    // reject quads containing too few pixels
-    int min_cluster_pixels;
-
-    // how many corner candidates to consider when segmenting a group
-    // of pixels into a quad.
-    int max_nmaxima;
-
-    // Reject quads where pairs of edges have angles that are close to
-    // straight or close to 180 degrees. Zero means that no quads are
-    // rejected. (In radians).
-    float critical_rad;
-    float cos_critical_rad;
-
-    // When fitting lines to the contours, what is the maximum mean
-    // squared error allowed?  This is useful in rejecting contours
-    // that are far from being quad shaped; rejecting these quads "early"
-    // saves expensive decoding processing.
-    float max_line_fit_mse;
-
-    // When we build our model of black & white pixels, we add an
-    // extra check that the white model must be (overall) brighter
-    // than the black model.  How much brighter? (in pixel values,
-    // [0,255]). .
-    int min_white_black_diff;
-
-    // should the thresholded image be deglitched? Only useful for
-    // very noisy images
-    int deglitch;
-};
-
-// Represents a detector object. Upon creating a detector, all fields
-// are set to reasonable values, but can be overridden by accessing
-// these fields.
-typedef struct apriltag_detector apriltag_detector_t;
-struct apriltag_detector
-{
-    ///////////////////////////////////////////////////////////////
-    // User-configurable parameters.
-
-    // How many threads should be used?
-    int nthreads;
-
-    // detection of quads can be done on a lower-resolution image,
-    // improving speed at a cost of pose accuracy and a slight
-    // decrease in detection rate. Decoding the binary payload is
-    // still done at full resolution. .
-    float quad_decimate;
-
-    // What Gaussian blur should be applied to the segmented image
-    // (used for quad detection?)  Parameter is the standard deviation
-    // in pixels.  Very noisy images benefit from non-zero values
-    // (e.g. 0.8).
-    float quad_sigma;
-
-    // When true, the edges of the each quad are adjusted to "snap
-    // to" strong gradients nearby. This is useful when decimation is
-    // employed, as it can increase the quality of the initial quad
-    // estimate substantially. Generally recommended to be on (true).
-    //
-    // Very computationally inexpensive. Option is ignored if
-    // quad_decimate = 1.
-    bool refine_edges;
-
-    // How much sharpening should be done to decoded images? This
-    // can help decode small tags but may or may not help in odd
-    // lighting conditions or low light conditions.
-    //
-    // The default value is 0.25.
-    double decode_sharpening;
-
-    // When true, write a variety of debugging images to the
-    // current working directory at various stages through the
-    // detection process. (Somewhat slow).
-    bool debug;
-
-    struct apriltag_quad_thresh_params qtp;
-
-    ///////////////////////////////////////////////////////////////
-    // Statistics relating to last processed frame
-    timeprofile_t *tp;
-
-    uint32_t nedges;
-    uint32_t nsegments;
-    uint32_t nquads;
-
-    ///////////////////////////////////////////////////////////////
-    // Internal variables below
-
-    // Not freed on apriltag_destroy; a tag family can be shared
-    // between multiple users. The user should ultimately destroy the
-    // tag family passed into the constructor.
-    zarray_cuda_t *tag_families;
-
-    // Used for thread safety.
-    pthread_mutex_t mutex;
-};
-
-// Represents the detection of a tag. These are returned to the user
-// and must be individually destroyed by the user.
-typedef struct apriltag_detection apriltag_detection_t;
-struct apriltag_detection
-{
-    // a pointer for convenience. not freed by apriltag_detection_destroy.
-    apriltag_family_t *family;
-
-    // The decoded ID of the tag
-    int id;
-
-    // How many error bits were corrected? Note: accepting large numbers of
-    // corrected errors leads to greatly increased false positive rates.
-    // NOTE: As of this implementation, the detector cannot detect tags with
-    // a hamming distance greater than 2.
-    int hamming;
-
-    // A measure of the quality of the binary decoding process: the
-    // average difference between the intensity of a data bit versus
-    // the decision threshold. Higher numbers roughly indicate better
-    // decodes. This is a reasonable measure of detection accuracy
-    // only for very small tags-- not effective for larger tags (where
-    // we could have sampled anywhere within a bit cell and still
-    // gotten a good detection.)
-    float decision_margin;
-
-    // The 3x3 homography matrix describing the projection from an
-    // "ideal" tag (with corners at (-1,1), (1,1), (1,-1), and (-1,
-    // -1)) to pixels in the image. This matrix will be freed by
-    // apriltag_detection_destroy.
-    matd_t *H;
-
-    // The center of the detection in image pixel coordinates.
-    double c[2];
-
-    // The corners of the tag in image pixel coordinates. These always
-    // wrap counter-clock wise around the tag.
-    double p[4][2];
-};
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////
-//
-// END apriltag.h CUDA version
 //
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -975,69 +75,6 @@ struct pt
     int16_t gx, gy;
 
     float slope;
-};
-
-struct unionfind_task
-{
-    int y0, y1;
-    int w, h, s;
-    unionfind_t *uf;
-    image_u8_t *im;
-};
-
-struct quad_task
-{
-    zarray_cuda_t *clusters;
-    int cidx0, cidx1; // [cidx0, cidx1)
-    zarray_cuda_t *quads;
-    apriltag_detector_t *td;
-    int w, h;
-
-    image_u8_t *im;
-    int tag_width;
-    bool normal_border;
-    bool reversed_border;
-};
-
-
-struct cluster_task
-{
-    int y0;
-    int y1;
-    int w;
-    int s;
-    int nclustermap;
-    unionfind_t* uf;
-    image_u8_t* im;
-    zarray_cuda_t* clusters;
-};
-
-struct minmax_task {
-    int ty;
-
-    image_u8_t *im;
-    uint8_t *im_max;
-    uint8_t *im_min;
-};
-
-struct blur_task {
-    int ty;
-
-    image_u8_t *im;
-    uint8_t *im_max;
-    uint8_t *im_min;
-    uint8_t *im_max_tmp;
-    uint8_t *im_min_tmp;
-};
-
-struct threshold_task {
-    int ty;
-
-    apriltag_detector_t *td;
-    image_u8_t *im;
-    image_u8_t *threshim;
-    uint8_t *im_max;
-    uint8_t *im_min;
 };
 
 struct remove_vertex
@@ -1219,9 +256,9 @@ __device__ void fit_line(struct line_fit_pt *lfps, int sz, int i0, int i1, doubl
 // returns 0 if the cluster looks bad.
 __device__ int quad_segment_agg(zarray_cuda_t *cluster, struct line_fit_pt *lfps, int indices[4])
 {
-    int sz = zarray_cuda_size_cuda(cluster);
+    int sz = zarray_size_cuda(cluster);
 
-    zmaxheap_t *heap = zmaxheap_create_cuda(sizeof(struct remove_vertex*));
+    zmaxheap_cuda_t *heap = zmaxheap_create_cuda(sizeof(struct remove_vertex*));
 
     // We will initially allocate sz rvs. We then have two types of
     // iterations: some iterations that are no-ops in terms of
@@ -1344,9 +381,9 @@ __device__ int quad_segment_agg(zarray_cuda_t *cluster, struct line_fit_pt *lfps
   rather than pairs of clusters.) Critically, this helps keep nearby
   edges from becoming connected.
 */
-__device__ int quad_segment_maxima(apriltag_detector_t *td, zarray_cuda_t *cluster, struct line_fit_pt *lfps, int indices[4])
+__device__ int quad_segment_maxima(apriltag_detector_cuda_t *td, zarray_cuda_t *cluster, struct line_fit_pt *lfps, int indices[4])
 {
-    int sz = zarray_cuda_size_cuda(cluster);
+    int sz = zarray_size_cuda(cluster);
 
     // ksz: when fitting points, how many points on either side do we consider?
     // (actual "kernel" width is 2ksz).
@@ -1359,7 +396,7 @@ __device__ int quad_segment_maxima(apriltag_detector_t *td, zarray_cuda_t *clust
 
     // XXX Tunable. Maybe make a multiple of JPEG block size to increase robustness
     // to JPEG compression artifacts?
-    int ksz = imin(20, sz / 12);
+    int ksz = imin_cuda(20, sz / 12);
 
     // can't fit a quad if there are too few points.
     if (ksz < 2)
@@ -1445,7 +482,7 @@ __device__ int quad_segment_maxima(apriltag_detector_t *td, zarray_cuda_t *clust
 
         // throw out all but the best handful of maxima. Sorts descending.
         // qsort(maxima_errs_copy, nmaxima, sizeof(double), err_compare_descending);
-        quick_sort_descending(maxima_errs_copy, 0, nmaxima - 1);
+        quick_sort_descending_cuda(maxima_errs_copy, 0, nmaxima - 1);
 
         double maxima_thresh = maxima_errs_copy[max_nmaxima];
         int out = 0;
@@ -1532,12 +569,12 @@ __device__ int quad_segment_maxima(apriltag_detector_t *td, zarray_cuda_t *clust
  * Compute statistics that allow line fit queries to be
  * efficiently computed for any contiguous range of indices.
  */
-__device__ struct line_fit_pt* compute_lfps(int sz, zarray_cuda_t* cluster, image_u8_t* im) {
+__device__ struct line_fit_pt* compute_lfps(int sz, zarray_cuda_t* cluster, image_u8_cuda_t* im) {
     struct line_fit_pt *lfps = (struct line_fit_pt *) calloc_cuda(sz, sizeof(struct line_fit_pt));
 
     for (int i = 0; i < sz; i++) {
         struct pt *p;
-        zarray_cuda_get_volatile_cuda(cluster, i, &p);
+        zarray_get_volatile_cuda(cluster, i, &p);
 
         if (i > 0) {
             memcpy(&lfps[i], &lfps[i-1], sizeof(struct line_fit_pt));
@@ -1671,16 +708,16 @@ __device__ static inline void ptsort(struct pt *pts, int sz)
 
 // return 1 if the quad looks okay, 0 if it should be discarded
 __device__ int fit_quad(
-        apriltag_detector_t *td,
-        image_u8_t *im,
+        apriltag_detector_cuda_t *td,
+        image_u8_cuda_t *im,
         zarray_cuda_t *cluster,
-        struct quad *quad,
+        struct quad_cuda *quad,
         int tag_width,
         bool normal_border,
         bool reversed_border) {
     int res = 0;
 
-    int sz = zarray_cuda_size_cuda(cluster);
+    int sz = zarray_size_cuda(cluster);
     if (sz < 24) // Synchronize with later check.
         return 0;
 
@@ -1692,14 +729,14 @@ __device__ int fit_quad(
     // compute a bounding box so that we can order the points
     // according to their angle WRT the center.
     struct pt *p1;
-    zarray_cuda_get_volatile_cuda(cluster, 0, &p1);
+    zarray_get_volatile_cuda(cluster, 0, &p1);
     uint16_t xmax = p1->x;
     uint16_t xmin = p1->x;
     uint16_t ymax = p1->y;
     uint16_t ymin = p1->y;
-    for (int pidx = 1; pidx < zarray_cuda_size_cuda(cluster); pidx++) {
+    for (int pidx = 1; pidx < zarray_size_cuda(cluster); pidx++) {
         struct pt *p;
-        zarray_cuda_get_volatile_cuda(cluster, pidx, &p);
+        zarray_get_volatile_cuda(cluster, pidx, &p);
 
         if (p->x > xmax) {
             xmax = p->x;
@@ -1730,9 +767,9 @@ __device__ int fit_quad(
 
     float quadrants[2][2] = {{-1*(2 << 15), 0}, {2*(2 << 15), 2 << 15}};
 
-    for (int pidx = 0; pidx < zarray_cuda_size_cuda(cluster); pidx++) {
+    for (int pidx = 0; pidx < zarray_size_cuda(cluster); pidx++) {
         struct pt *p;
-        zarray_cuda_get_volatile_cuda(cluster, pidx, &p);
+        zarray_get_volatile_cuda(cluster, pidx, &p);
 
         float dx = p->x - cx;
         float dy = p->y - cy;
@@ -1765,7 +802,7 @@ __device__ int fit_quad(
     // we now sort the points according to theta. This is a prepatory
     // step for segmenting them into four lines.
     if (1) {
-        ptsort((struct pt*) cluster->data, zarray_cuda_size_cuda(cluster));
+        ptsort((struct pt*) cluster->data, zarray_size_cuda(cluster));
     }
 
     struct line_fit_pt *lfps = compute_lfps(sz, cluster, im);
@@ -1844,8 +881,8 @@ __device__ int fit_quad(
         for (int i = 0; i < 3; i++) {
             int idxa = i; // 0, 1, 2,
             int idxb = (i+1) % 3; // 1, 2, 0
-            length[i] = sqrt(sq(quad->p[idxb][0] - quad->p[idxa][0]) +
-                             sq(quad->p[idxb][1] - quad->p[idxa][1]));
+            length[i] = sqrt(sq_cuda(quad->p[idxb][0] - quad->p[idxa][0]) +
+                             sq_cuda(quad->p[idxb][1] - quad->p[idxa][1]));
         }
         p = (length[0] + length[1] + length[2]) / 2;
 
@@ -1856,8 +893,8 @@ __device__ int fit_quad(
             int idxs[] = { 2, 3, 0, 2 };
             int idxa = idxs[i];
             int idxb = idxs[i+1];
-            length[i] = sqrt(sq(quad->p[idxb][0] - quad->p[idxa][0]) +
-                             sq(quad->p[idxb][1] - quad->p[idxa][1]));
+            length[i] = sqrt(sq_cuda(quad->p[idxb][0] - quad->p[idxa][0]) +
+                             sq_cuda(quad->p[idxb][1] - quad->p[idxa][1]));
         }
         p = (length[0] + length[1] + length[2]) / 2;
 
@@ -1895,16 +932,16 @@ __device__ int fit_quad(
 }
 
 __device__ static void do_quad_task_cuda(
-    apriltag_detector_t *td, int32_t cidx0, int32_t cidx1, int32_t h, int32_t w, 
-    zarray_cuda_t *quads, zarray_cuda_t *clusters, image_u8_t *im, int32_t tag_width, 
+    apriltag_detector_cuda_t *td, int32_t cidx0, int32_t cidx1, int32_t h, int32_t w, 
+    zarray_cuda_t *quads, zarray_cuda_t *clusters, image_u8_cuda_t *im, int32_t tag_width, 
     bool normal_border, bool reversed_border)
 {
     for (int cidx = cidx0; cidx < cidx1; cidx++) {
 
         zarray_cuda_t **cluster;
-        zarray_cuda_get_volatile_cuda(clusters, cidx, &cluster);
+        zarray_get_volatile_cuda(clusters, cidx, &cluster);
 
-        if (zarray_cuda_size_cuda(*cluster) < td->qtp.min_cluster_pixels)
+        if (zarray_size_cuda(*cluster) < td->qtp.min_cluster_pixels)
             continue;
 
         // a cluster should contain only boundary points around the
@@ -1913,30 +950,30 @@ __device__ static void do_quad_task_cuda(
         // fit quads to.) A typical point along an edge is added two
         // times (because it has 2 unique neighbors). The maximum
         // perimeter is 2w+2h.
-        if (zarray_cuda_size_cuda(*cluster) > 2*(2*w+2*h)) {
+        if (zarray_size_cuda(*cluster) > 2*(2*w+2*h)) {
             continue;
         }
 
-        struct quad quad;
-        memset(&quad, 0, sizeof(struct quad));
+        struct quad_cuda quad;
+        memset(&quad, 0, sizeof(struct quad_cuda));
 
         if (fit_quad(td, im, *cluster, &quad, tag_width, normal_border, reversed_border)) {
             // pthread_mutex_lock(&td->mutex); // FIXME
-            zarray_cuda_add_cuda(quads, &quad);
+            zarray_add_cuda(quads, &quad);
             // pthread_mutex_unlock(&td->mutex);
         }
     }
 }
 
-__device__ zarray_cuda_t* fit_quads(apriltag_detector_t *td, int w, int h, zarray_cuda_t* clusters, image_u8_t* im, int32_t num_threads) {
-    zarray_cuda_t *quads = zarray_cuda_create_cuda(sizeof(struct quad));
+__device__ zarray_cuda_t* fit_quads(apriltag_detector_cuda_t *td, int w, int h, zarray_cuda_t* clusters, image_u8_cuda_t* im, int32_t num_threads) {
+    zarray_cuda_t *quads = zarray_create_cuda(sizeof(struct quad_cuda));
 
     bool normal_border = false;
     bool reversed_border = false;
     int min_tag_width = 1000000;
-    for (int i = 0; i < zarray_cuda_size_cuda(td->tag_families); i++) {
-        apriltag_family_t* family;
-        zarray_cuda_get_cuda(td->tag_families, i, &family);
+    for (int i = 0; i < zarray_size_cuda(td->tag_families); i++) {
+        apriltag_family_cuda_t* family;
+        zarray_get_cuda(td->tag_families, i, &family);
         if (family->width_at_border < min_tag_width) {
             min_tag_width = family->width_at_border;
         }
@@ -1949,7 +986,7 @@ __device__ zarray_cuda_t* fit_quads(apriltag_detector_t *td, int w, int h, zarra
         min_tag_width = 3;
     }
 
-    int sz = zarray_cuda_size_cuda(clusters);
+    int sz = zarray_size_cuda(clusters);
 
     int32_t chunksize_;
     if (num_threads >= sz) {
@@ -1960,7 +997,7 @@ __device__ zarray_cuda_t* fit_quads(apriltag_detector_t *td, int w, int h, zarra
 
     if (threadIdx.x < sz) {
         int32_t c0 = threadIdx.x * chunksize_;
-        int32_t c1 = imin(c0 + chunksize_, sz);
+        int32_t c1 = imin_cuda(c0 + chunksize_, sz);
         do_quad_task_cuda(td, c0, c1, h, w, quads, clusters, im, min_tag_width, normal_border, reversed_border);
     }
 
@@ -1969,41 +1006,41 @@ __device__ zarray_cuda_t* fit_quads(apriltag_detector_t *td, int w, int h, zarra
 
 
 __device__ zarray_cuda_t* merge_clusters_cuda(zarray_cuda_t* c1, zarray_cuda_t* c2) {
-    zarray_cuda_t* ret = zarray_cuda_create_cuda(sizeof(struct cluster_hash*));
-    zarray_cuda_ensure_capacity_cuda(ret, zarray_cuda_size_cuda(c1) + zarray_cuda_size_cuda(c2));
+    zarray_cuda_t* ret = zarray_create_cuda(sizeof(struct cluster_hash*));
+    zarray_ensure_capacity_cuda(ret, zarray_size_cuda(c1) + zarray_size_cuda(c2));
 
     int i1 = 0;
     int i2 = 0;
-    int l1 = zarray_cuda_size_cuda(c1);
-    int l2 = zarray_cuda_size_cuda(c2);
+    int l1 = zarray_size_cuda(c1);
+    int l2 = zarray_size_cuda(c2);
 
     while (i1 < l1 && i2 < l2) {
         struct cluster_hash** h1;
         struct cluster_hash** h2;
-        zarray_cuda_get_volatile_cuda(c1, i1, &h1);
-        zarray_cuda_get_volatile_cuda(c2, i2, &h2);
+        zarray_get_volatile_cuda(c1, i1, &h1);
+        zarray_get_volatile_cuda(c2, i2, &h2);
 
         if ((*h1)->hash == (*h2)->hash && (*h1)->id == (*h2)->id) {
-            zarray_cuda_add_range_cuda((*h1)->data, (*h2)->data, 0, zarray_cuda_size_cuda((*h2)->data));
-            zarray_cuda_add_cuda(ret, h1);
+            zarray_add_range_cuda((*h1)->data, (*h2)->data, 0, zarray_size_cuda((*h2)->data));
+            zarray_add_cuda(ret, h1);
             i1++;
             i2++;
-            zarray_cuda_destroy_cuda((*h2)->data);
+            zarray_destroy_cuda((*h2)->data);
             free(*h2);
         } else if ((*h2)->hash < (*h1)->hash || ((*h2)->hash == (*h1)->hash && (*h2)->id < (*h1)->id)) {
-            zarray_cuda_add_cuda(ret, h2);
+            zarray_add_cuda(ret, h2);
             i2++;
         } else {
-            zarray_cuda_add_cuda(ret, h1);
+            zarray_add_cuda(ret, h1);
             i1++;
         }
     }
 
-    zarray_cuda_add_range_cuda(ret, c1, i1, l1);
-    zarray_cuda_add_range_cuda(ret, c2, i2, l2);
+    zarray_add_range_cuda(ret, c1, i1, l1);
+    zarray_add_range_cuda(ret, c2, i2, l2);
 
-    zarray_cuda_destroy_cuda(c1);
-    zarray_cuda_destroy_cuda(c2);
+    zarray_destroy_cuda(c1);
+    zarray_destroy_cuda(c2);
 
     return ret;
 }
@@ -2024,7 +1061,7 @@ __device__ void img_create_alignment(uint32_t width_in, uint32_t height_in, uint
 
 #define DO_UNIONFIND2_CUDA(dx, dy) if (im->buf[(y + dy)*s + x + dx] == v) unionfind_connect_cuda(uf, y*w + x, (y + dy)*w + x + dx);
 
-__device__ void do_unionfind_first_line_cuda(unionfind_t *uf, uint8_t *im, int32_t w, int32_t s)
+__device__ void do_unionfind_first_line_cuda(unionfind_cuda_t *uf, uint8_t *im, int32_t w, int32_t s)
 {
     int y = 0;
     uint8_t v;
@@ -2041,7 +1078,7 @@ __device__ void do_unionfind_first_line_cuda(unionfind_t *uf, uint8_t *im, int32
     }
 }
 
-__device__ void do_unionfind_line2_cuda(unionfind_t *uf, uint8_t *im, int w, int s, int y)
+__device__ void do_unionfind_line2_cuda(unionfind_cuda_t *uf, uint8_t *im, int w, int s, int y)
 {
     assert(y > 0);
 
@@ -2099,7 +1136,7 @@ __device__ void do_unionfind_line2_cuda(unionfind_t *uf, uint8_t *im, int w, int
 #undef DO_UNIONFIND2
 
 
-__device__ void do_unionfind_task2_cuda(unionfind_t *uf, uint8_t *im, int32_t w, int32_t s, int32_t y0, int32_t y1)
+__device__ void do_unionfind_task2_cuda(unionfind_cuda_t *uf, uint8_t *im, int32_t w, int32_t s, int32_t y0, int32_t y1)
 {
     for (int y = y0; y < y1; y++) {
         do_unionfind_line2_cuda(uf, im, w, s, y);
@@ -2108,9 +1145,9 @@ __device__ void do_unionfind_task2_cuda(unionfind_t *uf, uint8_t *im, int32_t w,
 
 
 
-__device__ unionfind_t *connected_components_cuda(uint8_t *threshim, uint32_t w, uint32_t h, uint32_t ts, uint32_t num_threads)
+__device__ unionfind_cuda_t *connected_components_cuda(uint8_t *threshim, uint32_t w, uint32_t h, uint32_t ts, uint32_t num_threads)
 {
-    __shared__ unionfind_t *uf;
+    __shared__ unionfind_cuda_t *uf;
     
     if (threadIdx.x == 0) {
         uf = unionfind_create_cuda(w * h);
@@ -2142,7 +1179,7 @@ __device__ unionfind_t *connected_components_cuda(uint8_t *threshim, uint32_t w,
     return uf;
 }
 
-__device__ zarray_cuda_t* do_gradient_clusters_cuda(image_u8_t* threshim, int ts, int y0, int y1, int w, int nclustermap, unionfind_t* uf, zarray_cuda_t* clusters) {
+__device__ zarray_cuda_t* do_gradient_clusters_cuda(image_u8_cuda_t* threshim, int ts, int y0, int y1, int w, int nclustermap, unionfind_cuda_t* uf, zarray_cuda_t* clusters) {
     struct uint64_zarray_cuda_entry **clustermap = (struct uint64_zarray_cuda_entry **) calloc_cuda(nclustermap, sizeof(struct uint64_zarray_cuda_entry*));
 
     int mem_chunk_size = 2048;
@@ -2199,13 +1236,13 @@ __device__ zarray_cuda_t* do_gradient_clusters_cuda(image_u8_t* threshim, int ts
                             mem_pool_loc++;                                 \
                                                                             \
                             entry->id = clusterid;                          \
-                            entry->cluster = zarray_cuda_create_cuda(sizeof(struct pt)); \
+                            entry->cluster = zarray_create_cuda(sizeof(struct pt)); \
                             entry->next = clustermap[clustermap_bucket];    \
                             clustermap[clustermap_bucket] = entry;          \
                         }                                                   \
                                                                             \
                         struct pt p = { .x = 2*x + dx, .y = 2*y + dy, .gx = dx*((int) v1-v0), .gy = dy*((int) v1-v0)}; \
-                        zarray_cuda_add_cuda(entry->cluster, &p);                     \
+                        zarray_add_cuda(entry->cluster, &p);                     \
                         connected = true;                                   \
                     }                                                   \
                 }                                                       \
@@ -2231,15 +1268,15 @@ __device__ zarray_cuda_t* do_gradient_clusters_cuda(image_u8_t* threshim, int ts
 #undef DO_CONN
 
     for (int i = 0; i < nclustermap; i++) {
-        int start = zarray_cuda_size_cuda(clusters);
+        int start = zarray_size_cuda(clusters);
         for (struct uint64_zarray_cuda_entry *entry = clustermap[i]; entry; entry = entry->next) {
             struct cluster_hash* cluster_hash = (struct cluster_hash *) malloc(sizeof(struct cluster_hash));
             cluster_hash->hash = u64hash_2_cuda(entry->id) % nclustermap;
             cluster_hash->id = entry->id;
             cluster_hash->data = entry->cluster;
-            zarray_cuda_add_cuda(clusters, &cluster_hash);
+            zarray_add_cuda(clusters, &cluster_hash);
         }
-        int end = zarray_cuda_size_cuda(clusters);
+        int end = zarray_size_cuda(clusters);
 
         // Do a quick bubblesort on the secondary key.
         int n = end - start;
@@ -2247,8 +1284,8 @@ __device__ zarray_cuda_t* do_gradient_clusters_cuda(image_u8_t* threshim, int ts
             for (int k = 0; k < n - j - 1; k++) {
                 struct cluster_hash** hash1;
                 struct cluster_hash** hash2;
-                zarray_cuda_get_volatile_cuda(clusters, start + k, &hash1);
-                zarray_cuda_get_volatile_cuda(clusters, start + k + 1, &hash2);
+                zarray_get_volatile_cuda(clusters, start + k, &hash1);
+                zarray_get_volatile_cuda(clusters, start + k + 1, &hash2);
                 if ((*hash1)->id > (*hash2)->id) {
                     struct cluster_hash tmp = **hash2;
                     **hash2 = **hash1;
@@ -2266,7 +1303,7 @@ __device__ zarray_cuda_t* do_gradient_clusters_cuda(image_u8_t* threshim, int ts
     return clusters;
 }
 
-__device__ zarray_cuda_t* gradient_clusters_cuda(apriltag_detector_t *td, image_u8_t* threshim, int w, int h, int ts, unionfind_t* uf, uint32_t num_threads) {
+__device__ zarray_cuda_t* gradient_clusters_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t* threshim, int w, int h, int ts, unionfind_cuda_t* uf, uint32_t num_threads) {
     zarray_cuda_t* clusters;
     int nclustermap = 0.2*w*h;
 
@@ -2316,7 +1353,7 @@ __device__ zarray_cuda_t* gradient_clusters_cuda(apriltag_detector_t *td, image_
         int32_t y1 = y0 + chunksize;
         y1 = y1 > sz ? sz : y1;
         __syncthreads();
-        zarray_cuda_t *clusters = do_gradient_clusters_cuda(threshim, ts, y0, y1, w, nclustermap/(sz / chunksize + 1), uf, zarray_cuda_create_cuda(sizeof(struct cluster_hash*)));
+        zarray_cuda_t *clusters = do_gradient_clusters_cuda(threshim, ts, y0, y1, w, nclustermap/(sz / chunksize + 1), uf, zarray_create_cuda(sizeof(struct cluster_hash*)));
         clusters_list[threadIdx.x] = clusters;
     }
 
@@ -2336,21 +1373,21 @@ __device__ zarray_cuda_t* gradient_clusters_cuda(apriltag_detector_t *td, image_
             length = (length >> 1) + length % 2;
         }
 
-        clusters = zarray_cuda_create_cuda(sizeof(zarray_cuda_t*));
-        zarray_cuda_ensure_capacity_cuda(clusters, zarray_cuda_size_cuda(clusters_list[0]));
-        for (int i = 0; i < zarray_cuda_size_cuda(clusters_list[0]); i++) {
+        clusters = zarray_create_cuda(sizeof(zarray_cuda_t*));
+        zarray_ensure_capacity_cuda(clusters, zarray_size_cuda(clusters_list[0]));
+        for (int i = 0; i < zarray_size_cuda(clusters_list[0]); i++) {
             struct cluster_hash** hash;
-            zarray_cuda_get_volatile_cuda(clusters_list[0], i, &hash);
-            zarray_cuda_add_cuda(clusters, &(*hash)->data);
+            zarray_get_volatile_cuda(clusters_list[0], i, &hash);
+            zarray_add_cuda(clusters, &(*hash)->data);
             free(*hash);
         }
-        zarray_cuda_destroy_cuda(clusters_list[0]);
+        zarray_destroy_cuda(clusters_list[0]);
         free(clusters_list);
     }
     return clusters;
 }
 
-__device__ void minmax_task_cuda(image_u8_t *im, uint8_t *im_max, uint8_t *im_min, int32_t ty_start, int32_t ty_end) 
+__device__ void minmax_task_cuda(image_u8_cuda_t *im, uint8_t *im_max, uint8_t *im_min, int32_t ty_start, int32_t ty_end) 
 {
     const int tile_size = 4;
 
@@ -2381,7 +1418,7 @@ __device__ void minmax_task_cuda(image_u8_t *im, uint8_t *im_max, uint8_t *im_mi
     }
 }
 
-__device__ void blur_task_cuda(image_u8_t *im, uint8_t *im_max, uint8_t *im_min, uint8_t *im_max_tmp, uint8_t *im_min_tmp, int32_t ty_start, int32_t ty_end)
+__device__ void blur_task_cuda(image_u8_cuda_t *im, uint8_t *im_max, uint8_t *im_min, uint8_t *im_max_tmp, uint8_t *im_min_tmp, int32_t ty_start, int32_t ty_end)
 {
     const int32_t tile_size = 4;
     int32_t tw  = im->width / tile_size;
@@ -2413,7 +1450,7 @@ __device__ void blur_task_cuda(image_u8_t *im, uint8_t *im_max, uint8_t *im_min,
     }
 }
 
-__device__ void threshold_task_cuda(image_u8_t *im, image_u8_t *threshim, uint8_t *im_max, uint8_t *im_min, apriltag_detector_t *td, int32_t ty_start, int32_t ty_end)
+__device__ void threshold_task_cuda(image_u8_cuda_t *im, image_u8_cuda_t *threshim, uint8_t *im_max, uint8_t *im_min, apriltag_detector_cuda_t *td, int32_t ty_start, int32_t ty_end)
 {
     const int32_t tilesz = 4;
     int32_t tw = im->width / tilesz;
@@ -2460,7 +1497,7 @@ __device__ void threshold_task_cuda(image_u8_t *im, image_u8_t *threshim, uint8_
     }
 }
 
-__device__ image_u8_t *threshold_cuda(apriltag_detector_t *td, image_u8_t *im, int32_t num_threads) 
+__device__ image_u8_cuda_t *threshold_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im, int32_t num_threads) 
 {
     int w = im->width, h = im->height, s = im->stride;
     
@@ -2469,7 +1506,7 @@ __device__ image_u8_t *threshold_cuda(apriltag_detector_t *td, image_u8_t *im, i
     int tw = w / tilesz;
     int th = h / tilesz;
 
-    __shared__ image_u8_t *threshim;
+    __shared__ image_u8_cuda_t *threshim;
     __shared__ uint8_t *im_max;
     __shared__ uint8_t *im_min;
     __shared__ uint8_t *im_max_tmp;
@@ -2559,7 +1596,7 @@ __device__ image_u8_t *threshold_cuda(apriltag_detector_t *td, image_u8_t *im, i
         // this is a dilate/erode deglitching scheme that does not improve
         // anything as far as I can tell.
         if (td->qtp.deglitch) {
-            image_u8_t *tmp = image_u8_create_cuda(w, h);
+            image_u8_cuda_t *tmp = image_u8_create_cuda(w, h);
 
             for (int y = 1; y + 1 < h; y++) {
                 for (int x = 1; x + 1 < w; x++) {
@@ -2598,14 +1635,14 @@ __device__ image_u8_t *threshold_cuda(apriltag_detector_t *td, image_u8_t *im, i
     return threshim;
 }
 
-__device__ zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_t *td, image_u8_t *im, int32_t num_threads)
+__device__ zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im, int32_t num_threads)
 {
     ////////////////////////////////////////////////////////
     // step 1. threshold the image, creating the edge image.
 
     int w = im->width, h = im->height;
 
-    __shared__ image_u8_t *threshim;
+    __shared__ image_u8_cuda_t *threshim;
 
     if (threadIdx.x == 0) {
         threshim = threshold_cuda(td, im, num_threads);
@@ -2618,7 +1655,8 @@ __device__ zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_t *td, ima
     ////////////////////////////////////////////////////////
     // step 2. find connected components.
 
-    __shared__ unionfind_t *uf;
+    __shared__ unionfind_cuda_t *uf;
+    __syncthreads();
     if (threadIdx.x == 0) {
         uf = connected_components_cuda(threshim->buf, w, h, ts, num_threads);
     } else {
@@ -2626,25 +1664,40 @@ __device__ zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_t *td, ima
     }
 
     
-    zarray_cuda_t* clusters = gradient_clusters_cuda(td, threshim, w, h, ts, uf, num_threads);
+    __shared__ zarray_cuda_t* clusters;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        clusters = gradient_clusters_cuda(td, threshim, w, h, ts, uf, num_threads);
+    } else {
+        gradient_clusters_cuda(td, threshim, w, h, ts, uf, num_threads);
+    }
 
-
-    image_u8_destroy_cuda(threshim);
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        image_u8_destroy_cuda(threshim);
+    }
 
     ////////////////////////////////////////////////////////
     // step 3. process each connected component.
-
-    zarray_cuda_t* quads = fit_quads(td, w, h, clusters, im, num_threads);
-
-    unionfind_destroy_cuda(uf);
-
-    for (int i = 0; i < zarray_cuda_size_cuda(clusters); i++) {
-        zarray_cuda_t *cluster;
-        zarray_cuda_get_cuda(clusters, i, &cluster);
-        zarray_cuda_destroy_cuda(cluster);
+    __shared__ zarray_cuda_t* quads;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        quads = fit_quads(td, w, h, clusters, im, num_threads);
+    } else {
+        quads = fit_quads(td, w, h, clusters, im, num_threads);
     }
-    zarray_cuda_destroy_cuda(clusters);
 
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        unionfind_destroy_cuda(uf);
+    
+        for (int i = 0; i < zarray_size_cuda(clusters); i++) {
+            zarray_cuda_t *cluster;
+            zarray_get_cuda(clusters, i, &cluster);
+            zarray_destroy_cuda(cluster);
+        }
+        zarray_destroy_cuda(clusters);
+    }
     return quads;
 }
 
