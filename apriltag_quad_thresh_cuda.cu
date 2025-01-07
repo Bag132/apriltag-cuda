@@ -1157,7 +1157,7 @@ __device__ unionfind_cuda_t *connected_components_cuda(uint8_t *threshim, uint32
     if (threadIdx.x < h) {
         int32_t row_chunk_size;
         if (num_threads > h) {
-            row_chunk_size == 1;
+            row_chunk_size = 1;
         } else {
             row_chunk_size = h / num_threads;
         }

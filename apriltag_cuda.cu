@@ -54,7 +54,12 @@ either expressed or implied, of the Regents of The University of Michigan.
 
 #include "apriltag_math_cuda.cuh"
 
+#include "tag36h11_cuda.cuh"
+
 // #include "common/postscript_utils.h"
+
+#define T0_print(format) if (threadIdx.x == 0) printf(format)
+#define T0_printf(format, ...) if (threadIdx.x == 0) printf(format, __VA_ARGS__)
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 //
@@ -176,7 +181,7 @@ __device__ struct quad_cuda *quad_copy_cuda(struct quad_cuda *quad)
     return q;
 }
 
-__device__ void quick_decode_add_cuda(struct quick_decode *qd, uint64_t code, int id, int hamming)
+__host__ __device__ void quick_decode_add_cuda(struct quick_decode *qd, uint64_t code, int id, int hamming)
 {
     uint32_t bucket = code % qd->nentries;
 
@@ -200,7 +205,7 @@ __device__ void quick_decode_uninit_cuda(apriltag_family_cuda_t *fam)
     fam->impl = NULL;
 }
 
-__device__ void quick_decode_init_cuda(apriltag_family_cuda_t *family, int maxhamming)
+__host__ __device__ void quick_decode_init_cuda(apriltag_family_cuda_t *family, int maxhamming)
 {
     assert(family->impl == NULL);
     assert(family->ncodes < 65536);
@@ -341,7 +346,7 @@ __device__ void apriltag_detector_remove_family_cuda(apriltag_detector_cuda_t *t
     zarray_remove_value_cuda(td->tag_families, &fam, 0);
 }
 
-__device__ void apriltag_detector_add_family_bits_cuda(apriltag_detector_cuda_t *td, apriltag_family_cuda_t *fam, int bits_corrected)
+__host__ __device__ void apriltag_detector_add_family_bits_cuda(apriltag_detector_cuda_t *td, apriltag_family_cuda_t *fam, int bits_corrected)
 {
     zarray_add_cuda(td->tag_families, &fam);
 
@@ -359,7 +364,7 @@ __device__ void apriltag_detector_clear_families_cuda(apriltag_detector_cuda_t *
     zarray_clear_cuda(td->tag_families);
 }
 
-__device__ apriltag_detector_cuda_t *apriltag_detector_create_cuda()
+__host__ __device__ apriltag_detector_cuda_t *apriltag_detector_create_cuda()
 {
     apriltag_detector_cuda_t *td = (apriltag_detector_cuda_t*) calloc_cuda(1, sizeof(apriltag_detector_cuda_t));
 
@@ -1041,21 +1046,83 @@ __device__ static int prefer_smaller(int pref, double q0, double q1)
     return 0;
 }
 
-__global__ void apriltag_detector_detect_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im_orig, int32_t num_threads, zarray_cuda_t **out)
+// djb2
+__device__ uint32_t compute_image_hash(image_u8_cuda_t *im) 
 {
-    if (zarray_size_cuda(td->tag_families) == 0) {
-        zarray_cuda_t *s = zarray_create_cuda(sizeof(apriltag_detection_cuda_t*));
-        printf("No tag families enabled\n");
+    unsigned long hash = 5381;
+    int c;
+
+    for (int i = 0; i < im->stride * im->height; i++) {
+        c = im->buf[i];
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    }
+
+    return hash;
+}
+
+__global__ void apriltag_detector_detect_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im_orig, int32_t num_threads, zarray_cuda_t **out, uint8_t *dbg_im_buf, int32_t *dbg_im_w, int32_t *dbg_im_h, int32_t *dbg_im_s)
+{
+    __shared__ bool abort;
+    __shared__ image_u8_cuda_t *quad_im;
+    __shared__ apriltag_family_cuda_t *fam;
+
+    if (threadIdx.x == 0) {
+        abort = false;
+
+        printf("GPU: Started kernel with %d threads\n", num_threads);
+
+        td->tag_families = zarray_create_cuda(sizeof(apriltag_family_cuda_t*));
+
+        printf("GPU: Detector decode sharpening: %f, quad_decimate: %f\n", td->decode_sharpening, td->quad_decimate);
+
+        uint32_t im_buf_hash = compute_image_hash(im_orig);
+        printf("GPU: im_orig width: %d, stride: %d, height %d, buf: 0x%X\n", im_orig->width, im_orig->stride, im_orig->height, im_buf_hash);
+
+        fam = tag36h11_create_cuda();
+
+        apriltag_detector_add_family_cuda(td, fam);
+
+        if (zarray_size_cuda(td->tag_families) == 0) {
+            printf("No tag families enabled\n");
+            abort = true;
+        }
+
+        quad_im = im_orig;
+
+        ///////////////////////////////////////////////////////////
+        // Step 1. Detect quads according to requested image decimation
+        // and blurring parameters.
+        if (td->quad_decimate > 1) {
+            printf("GPU: Decimating\n");
+            quad_im = image_u8_decimate_cuda(im_orig, td->quad_decimate);
+        }
+    }
+
+    __syncthreads();
+
+    if (abort) {
         return;
     }
 
-    ///////////////////////////////////////////////////////////
-    // Step 1. Detect quads according to requested image decimation
-    // and blurring parameters.
-    image_u8_cuda_t *quad_im = im_orig;
-    if (td->quad_decimate > 1) {
-        quad_im = image_u8_decimate_cuda(im_orig, td->quad_decimate);
+    if (threadIdx.x == 0) {
+        uint32_t quad_im_hash = compute_image_hash(quad_im);
+        printf("GPU: Returning decimate image, width: %d, stride: %d, height %d, buf: 0x%X\n", quad_im->width, quad_im->stride, quad_im->height, quad_im_hash);
+        // tag36h11_destroy_cuda(fam);
+        uint32_t buf_size = quad_im->stride * quad_im->height;
+        memcpy(dbg_im_buf, quad_im->buf, buf_size);
+
+        *dbg_im_w = quad_im->width;
+        *dbg_im_h = quad_im->height;
+        *dbg_im_s = quad_im->stride;
+
+        for (int32_t i = 0; i < zarray_size_cuda(td->tag_families); i++) {
+            apriltag_family_cuda_t f;
+            zarray_get_cuda(td->tag_families, i, &f);
+            tag36h11_destroy_cuda(&f);
+        }
     }
+
+    return;
     
     if (td->quad_sigma != 0) {
         // compute a reasonable kernel width by figuring that the
@@ -1260,10 +1327,21 @@ __global__ void apriltag_detector_detect_cuda(apriltag_detector_cuda_t *td, imag
 
     zarray_destroy_cuda(quads);
 
+    for (int i = 0; i < zarray_size_cuda(detections); i++) {
+        apriltag_detection_cuda_t *det;
+        zarray_get_cuda(detections, i, det); 
+        matd_destroy_cuda(det->H);
+        
+    }
+
     // TODO: Re-implement this for CUDA
     // zarray_sort_cuda(detections, detection_compare_function_cuda);
 
     *out = detections;
+
+    if (threadIdx.x == 0) {
+        printf("Finished kernel");
+    }
 }
 
 

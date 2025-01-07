@@ -1,13 +1,39 @@
 #include <stdlib.h>
 #include <stdint.h> 
+#include <stdio.h>
+
+#include <cuda_runtime.h>
+#include <cuda_runtime_api.h>
 
 #include "cuda_helpers.cuh"
 
 #define qswap(A,B) { double temp = A; A = B; B = temp;}
 
-__device__ void *calloc_cuda(size_t nmemb, size_t size)
+
+__host__ __device__ size_t strlen_cuda(const char* str) {
+    if (str == NULL) {
+        return 0; // Handle null pointer input
+    }
+
+    size_t length = 0;
+
+    // Iterate through the string until the null terminator is reached
+    while (str[length] != '\0') {
+        length++;
+    }
+
+    return length;
+}
+
+__host__ __device__ void *calloc_cuda(size_t nmemb, size_t size)
 {
     register uint8_t* mem = (uint8_t*) malloc(nmemb * size);
+
+    if (mem == NULL) {
+        printf("calloc_cuda: mem = NULL. Tried to allocate %fkB.\n", (float) (nmemb * size) / 1000.f);
+        return mem;
+    }
+
     if (mem) {
         for (int32_t i = 0; i < nmemb * size; i++) {
             mem[i] = 0;
@@ -16,7 +42,7 @@ __device__ void *calloc_cuda(size_t nmemb, size_t size)
     return mem;
 }
 
-__device__ void *realloc_cuda(void *old_ptr, size_t old_ptr_size, size_t size)
+__host__ __device__ void *realloc_cuda(void *old_ptr, size_t old_ptr_size, size_t size)
 {
     register uint8_t *e;
     e = (uint8_t*) malloc(size);
@@ -151,6 +177,28 @@ __device__ int strcmp_cuda(const char *str1, const char *str2) {
     }
     return *(unsigned char *)str1 - *(unsigned char *)str2;
 }
+
+__host__ __device__ char* strdup_cuda(const char *str) {
+    if (str == NULL) {
+        return NULL; // Handle null pointer input
+    }
+
+    // Find the length of the string, including the null terminator
+    size_t length = strlen_cuda(str) + 1;
+
+    // Allocate memory for the duplicate string
+    char* duplicate = (char*) malloc(length);
+
+    if (duplicate == NULL) {
+        return NULL; // Handle memory allocation failure
+    }
+
+    // Copy the string into the newly allocated memory
+    memcpy(duplicate, str, length);
+
+    return duplicate;
+}
+
 
 __device__ int isspace_cuda(int x) {
     switch (x) {

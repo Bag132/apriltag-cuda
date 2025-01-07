@@ -32,6 +32,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 // #endif
 
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "common/cuda/matd_cuda.cuh"
 #include "common/cuda/image_u8_cuda.cuh"
@@ -231,16 +232,16 @@ struct apriltag_detection_cuda
 };
 
 // don't forget to add a family!
-__device__ apriltag_detector_cuda_t *apriltag_detector_create_cuda();
+__host__ __device__ apriltag_detector_cuda_t *apriltag_detector_create_cuda();
 
 // add a family to the apriltag detector. caller still "owns" the family.
 // a single instance should only be provided to one apriltag detector instance.
-__device__ void apriltag_detector_add_family_bits_cuda(apriltag_detector_cuda_t *td, apriltag_family_cuda_t *fam, int bits_corrected);
+__host__ __device__ void apriltag_detector_add_family_bits_cuda(apriltag_detector_cuda_t *td, apriltag_family_cuda_t *fam, int bits_corrected);
 
 // Tunable, but really, 2 is a good choice. Values of >=3
 // consume prohibitively large amounts of memory, and otherwise
 // you want the largest value possible.
-__device__ static inline void apriltag_detector_add_family_cuda(apriltag_detector_cuda_t *td, apriltag_family_cuda_t *fam)
+__host__ __device__ static inline void apriltag_detector_add_family_cuda(apriltag_detector_cuda_t *td, apriltag_family_cuda_t *fam)
 {
     apriltag_detector_add_family_bits_cuda(td, fam, 2);
 }
@@ -259,7 +260,7 @@ __device__ void apriltag_detector_destroy_cuda(apriltag_detector_cuda_t *td);
 // apriltag_detection_t*. You can use apriltag_detections_destroy to
 // free the array and the detections it contains, or call
 // _detection_destroy and zarray_destroy yourself.
-__device__ zarray_cuda_t *apriltag_detector_detect_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im_orig);
+__global__ void apriltag_detector_detect_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im_orig, int32_t num_threads, zarray_cuda_t **out, uint8_t *dbg_im_buf, int32_t *dbg_im_w, int32_t *dbg_im_h, int32_t *dbg_im_s);
 
 // zarray_t *apriltag_detector_detect_cuda(apriltag_detector_cuda_t *td, image_u8_t *im_orig, uint8_t *dev_img);
 

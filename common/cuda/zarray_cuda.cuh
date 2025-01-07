@@ -31,6 +31,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "cuda_helpers.cuh"
 
@@ -52,7 +53,7 @@ struct zarray_cuda
  * the specified size. It is the caller's responsibility to call zarray_destroy()
  * on the returned array when it is no longer needed.
  */
-__device__ static inline zarray_cuda_t *zarray_create_cuda(size_t el_sz)
+__host__ __device__ static inline zarray_cuda_t *zarray_create_cuda(size_t el_sz)
 {
     assert(el_sz > 0);
 
@@ -153,7 +154,7 @@ int zarray_isempty(const zarray_t *za)
  * Allocates enough internal storage in the supplied variable array structure to
  * guarantee that the supplied number of elements (capacity) can be safely stored.
  */
-__device__ static inline void zarray_ensure_capacity_cuda(zarray_cuda_t *za, int capacity)
+__host__ __device__ inline void zarray_ensure_capacity_cuda(zarray_cuda_t *za, int capacity)
 {
     assert(za != NULL);
 
@@ -176,7 +177,7 @@ __device__ static inline void zarray_ensure_capacity_cuda(zarray_cuda_t *za, int
  * (by copying) from the data pointed to by the supplied pointer 'p'.
  * Automatically ensures that enough storage space is available for the new element.
  */
-__device__ static inline void zarray_add_cuda(zarray_cuda_t *za, const void *p)
+__host__ __device__ inline void zarray_add_cuda(zarray_cuda_t *za, const void *p)
 {
     assert(za != NULL);
     assert(p != NULL);
@@ -461,3 +462,8 @@ __device__ static inline void zarray_add_range_cuda(zarray_cuda_t *dest, const z
     memcpy(&dest->data[dest->size*dest->el_sz], &source->data[source->el_sz*start], dest->el_sz*count);
     dest->size += count;
 }
+
+// __host__ __device__ inline void zarray_cudaMemcpy(zarray_cuda_t *dst, zarray_cuda_t *src, cudaMemcpyKind)
+// {
+//     for (uint32_t i = 0; i < zarray_cuda)
+// }

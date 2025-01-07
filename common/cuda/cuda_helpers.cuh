@@ -1,8 +1,8 @@
 #pragma once
 
-extern __device__ void *calloc_cuda(size_t nmemb, size_t size);
+extern __host__ __device__ void *calloc_cuda(size_t nmemb, size_t size);
 
-__device__ void *realloc_cuda(void *old_ptr, size_t old_ptr_size, size_t size);
+__host__ __device__ void *realloc_cuda(void *old_ptr, size_t old_ptr_size, size_t size);
 
 __device__ void *memmove_cuda(void *src, void *dest, int32_t n);
 
@@ -15,6 +15,8 @@ __device__ float fmin_cuda(const float a, const float b);
 __device__ double strtod_cuda(const char *nptr, char **endptr);
 
 __device__ int strcmp_cuda(const char *str1, const char *str2);
+
+__host__ __device__ char* strdup_cuda(const char *str);
 
 __device__ int isspace_cuda(int x);
 
