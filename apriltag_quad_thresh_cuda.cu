@@ -50,6 +50,9 @@ either expressed or implied, of the Regents of The University of Michigan.
 
 #include "common/cuda/cuda_helpers.cuh"
 
+#define MAX(a, b) (a > b ? a : b)
+#define MIN(a, b) (a < b ? a : b)
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 //
 // START apriltag.h CUDA version
@@ -1389,20 +1392,36 @@ __device__ zarray_cuda_t* gradient_clusters_cuda(apriltag_detector_cuda_t *td, i
 
 __device__ void minmax_task_cuda(image_u8_cuda_t *im, uint8_t *im_max, uint8_t *im_min, int32_t ty_start, int32_t ty_end) 
 {
+    return;
     const int tile_size = 4;
 
     // Tiled img width 
     int tw = im->width / tile_size;
-
     for (int32_t ty = ty_start; ty < ty_end; ty++) {
+        if (threadIdx.x == 0) {
+            // printf("first loop\n");
+        }
+
         for (int tx = 0; tx < tw; tx++) {
             uint8_t max = 0, min = 255;
+            // if (threadIdx.x == 0) {
+            //     printf("second loop tx = %d tw = %d\n", tx, tw);
+            // }
 
             // Iterate inner y pixels
-            for (int dy = 0; dy < tile_size; dy++) {
+            for (int dy = 0; dy < tile_size; dy++) { // FIXME: runs forever
+                // if (threadIdx.x == 0) {
+                //     printf("third loop dy = %d, tile_size = %d\n", dy, tile_size);
+                // }
+
                 // Iterate inner x pixels
                 for (int dx = 0; dx < tile_size; dx++) {
+                    // if (threadIdx.x == 0) {
+                    //     printf("fourth loop\n"); //embedde and robotics
+                    // }
+
                     // Get current pixel
+                    // printf("Accessing %d with buf size %d\n", (ty*tile_size+dy)*im->stride + tx*tile_size + dx, im->stride * im->height);
                     uint8_t v = im->buf[(ty*tile_size+dy)*im->stride + tx*tile_size + dx];
                     // Find min and max pixel values inside the current tile
                     if (v < min)
@@ -1410,11 +1429,14 @@ __device__ void minmax_task_cuda(image_u8_cuda_t *im, uint8_t *im_max, uint8_t *
                     if (v > max)
                         max = v;
                 }
+                // return;
             }
             // Set max and min values 
             im_max[ty*tw+tx] = max;
             im_min[ty*tw+tx] = min;
+            // return;
         }
+        // return;
     }
 }
 
@@ -1497,6 +1519,21 @@ __device__ void threshold_task_cuda(image_u8_cuda_t *im, image_u8_cuda_t *thresh
     }
 }
 
+__device__ uint32_t compute_buf_hash_cuda(void *buf, uint32_t buf_size)
+{
+    register uint8_t *ubuf = (uint8_t *) buf;
+    unsigned long hash = 5381;
+    int c;
+
+    for (int i = 0; i < buf_size; i++) {
+        c = ubuf[i];
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    }
+
+    return hash;
+
+}
+
 __device__ image_u8_cuda_t *threshold_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im, int32_t num_threads) 
 {
     int w = im->width, h = im->height, s = im->stride;
@@ -1513,6 +1550,7 @@ __device__ image_u8_cuda_t *threshold_cuda(apriltag_detector_cuda_t *td, image_u
     __shared__ uint8_t *im_min_tmp;
 
     if (threadIdx.x == 0) {
+        printf("Creating threshim\n");
         threshim = image_u8_create_alignment_cuda(w, h, s); 
         im_max = (uint8_t *) calloc_cuda(tw*th, sizeof(uint8_t));
         im_min = (uint8_t *) calloc_cuda(tw*th, sizeof(uint8_t));
@@ -1520,23 +1558,36 @@ __device__ image_u8_cuda_t *threshold_cuda(apriltag_detector_cuda_t *td, image_u
         im_min_tmp = (uint8_t *) calloc_cuda(tw*th, sizeof(uint8_t));
     }
 
-    if (threadIdx.x < th) {
+    if (threadIdx.x < th) { // FIXME: Can't have __syncthreads inside if
         int32_t row_chunk_size;
         if (num_threads > th) {
             row_chunk_size = 1;
         } else {
-            row_chunk_size = th / num_threads;
+            row_chunk_size = 1 + th / num_threads;
         }
 
         int32_t row_start = row_chunk_size * threadIdx.x;
-        int32_t row_end = row_start + row_chunk_size;
+        int32_t row_end = MIN(row_start + row_chunk_size, th);
 
-        __syncthreads();
-
+        if (threadIdx.x == 0 || threadIdx.x == 11) {
+            printf("thread %d minmax im height = %d, row_start = %d, row_end = %d\n", threadIdx.x, th, row_start, row_end);
+        }
+        // printf("Reached %d\n", threadIdx.x);
+        // return NULL;
+        // __syncthreads(); // FIXME: Jets
+        // return NULL;
         minmax_task_cuda(im, im_max, im_min, row_start, row_end);
+        // return NULL;
+        // __syncthreads();
 
-        __syncthreads();
+        if (threadIdx.x == 0) {
+            printf("minmax done\n");
+            uint32_t im_max_hash = compute_buf_hash_cuda(im_max, tw * th * sizeof(uint8_t));
+            uint32_t im_min_hash = compute_buf_hash_cuda(im_min, tw * th * sizeof(uint8_t));
+            printf("GPU: minmax im_max: 0x%X, im_min: 0x%X\n", im_max_hash, im_min_hash);
+        }
 
+        return NULL;
         blur_task_cuda(im, im_max, im_min, im_max_tmp, im_min_tmp, row_start, row_end);
 
         __syncthreads();
@@ -1551,6 +1602,8 @@ __device__ image_u8_cuda_t *threshold_cuda(apriltag_detector_cuda_t *td, image_u
         __syncthreads();
 
         threshold_task_cuda(im, threshim, im_max, im_min, td, row_start, row_end);
+    } else {
+        printf("Skipped thresholding\n");
     }
 
     // we skipped over the non-full-sized tiles above. Fix those now.
@@ -1635,7 +1688,7 @@ __device__ image_u8_cuda_t *threshold_cuda(apriltag_detector_cuda_t *td, image_u
     return threshim;
 }
 
-__device__ zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im, int32_t num_threads)
+__device__ zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im, int32_t num_threads, image_u8_cuda_t **dbg)
 {
     ////////////////////////////////////////////////////////
     // step 1. threshold the image, creating the edge image.
@@ -1645,10 +1698,16 @@ __device__ zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_cuda_t *td
     __shared__ image_u8_cuda_t *threshim;
 
     if (threadIdx.x == 0) {
+        printf("thresholding\n");
         threshim = threshold_cuda(td, im, num_threads);
     } else {
         threshold_cuda(td, im, num_threads);
     }
+
+    return NULL;
+
+    *dbg = threshim;
+
 
     int ts = threshim->stride;
 

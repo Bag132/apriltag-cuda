@@ -81,7 +81,7 @@ static inline long int random(void)
 
 #define APRILTAG_U64_ONE ((uint64_t) 1)
 
-__device__ extern zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im, int32_t num_threads);
+__device__ extern zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im, int32_t num_threads, image_u8_cuda_t **dbg);
 
 // Regresses a model of the form:
 // intensity(x,y) = C0*x + C1*y + CC2
@@ -1060,6 +1060,21 @@ __device__ uint32_t compute_image_hash(image_u8_cuda_t *im)
     return hash;
 }
 
+// __device__ uint32_t compute_buf_hash(void *buf, uint32_t buf_size) // TODO: deal with other hash func
+// {
+//     register uint8_t *ubuf = (uint8_t *) buf;
+//     unsigned long hash = 5381;
+//     int c;
+
+//     for (int i = 0; i < buf_size; i++) {
+//         c = ubuf[i];
+//         hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+//     }
+
+//     return hash;
+
+// }
+
 __global__ void apriltag_detector_detect_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im_orig, int32_t num_threads, zarray_cuda_t **out, uint8_t *dbg_im_buf, int32_t *dbg_im_w, int32_t *dbg_im_h, int32_t *dbg_im_s)
 {
     __shared__ bool abort;
@@ -1093,27 +1108,74 @@ __global__ void apriltag_detector_detect_cuda(apriltag_detector_cuda_t *td, imag
         // Step 1. Detect quads according to requested image decimation
         // and blurring parameters.
         if (td->quad_decimate > 1) {
-            printf("GPU: Decimating\n");
             quad_im = image_u8_decimate_cuda(im_orig, td->quad_decimate);
         }
+    
+        if (td->quad_sigma != 0) {
+            // compute a reasonable kernel width by figuring that the
+            // kernel should go out 2 std devs.
+            //
+            // max sigma          ksz
+            // 0.499              1  (disabled)
+            // 0.999              3
+            // 1.499              5
+            // 1.999              7
+
+            float sigma = fabsf((float) td->quad_sigma);
+
+            int ksz = 4 * sigma; // 2 std devs in each direction
+            if ((ksz & 1) == 0)
+                ksz++;
+
+            if (ksz > 1) {
+
+                if (td->quad_sigma > 0) {
+                    // Apply a blur
+                    image_u8_gaussian_blur_cuda(quad_im, sigma, ksz);
+                } else {
+                    // SHARPEN the image by subtracting the low frequency components.
+                    image_u8_cuda_t *orig = image_u8_copy_cuda(quad_im);
+                    image_u8_gaussian_blur_cuda(quad_im, sigma, ksz);
+
+                    for (int y = 0; y < orig->height; y++) {
+                        for (int x = 0; x < orig->width; x++) {
+                            int vorig = orig->buf[y*orig->stride + x];
+                            int vblur = quad_im->buf[y*quad_im->stride + x];
+
+                            int v = 2*vorig - vblur;
+                            if (v < 0)
+                                v = 0;
+                            if (v > 255)
+                                v = 255;
+
+                            quad_im->buf[y*quad_im->stride + x] = (uint8_t) v;
+                        }
+                    }
+                    image_u8_destroy_cuda(orig);
+                }
+            }
+        }
+
     }
 
     __syncthreads();
-
-    if (abort) {
-        return;
+    
+    image_u8_cuda_t *dbg;
+    if (threadIdx.x == 0) {
+        printf("Entering apriltag_quad_thresh_cuda\n");
     }
+    zarray_cuda_t *quads = apriltag_quad_thresh_cuda(td, quad_im, num_threads, &dbg);
 
     if (threadIdx.x == 0) {
-        uint32_t quad_im_hash = compute_image_hash(quad_im);
-        printf("GPU: Returning decimate image, width: %d, stride: %d, height %d, buf: 0x%X\n", quad_im->width, quad_im->stride, quad_im->height, quad_im_hash);
-        // tag36h11_destroy_cuda(fam);
-        uint32_t buf_size = quad_im->stride * quad_im->height;
-        memcpy(dbg_im_buf, quad_im->buf, buf_size);
+        uint32_t dbg_im_hash = compute_image_hash(dbg);
+        printf("GPU: Returning threshold image, width: %d, stride: %d, height %d, buf: 0x%X\n", dbg->width, dbg->stride, dbg->height, dbg_im_hash);
 
-        *dbg_im_w = quad_im->width;
-        *dbg_im_h = quad_im->height;
-        *dbg_im_s = quad_im->stride;
+        uint32_t buf_size = dbg->stride * dbg->height;
+        memcpy(dbg_im_buf, dbg->buf, buf_size);
+
+        *dbg_im_w = dbg->width;
+        *dbg_im_h = dbg->height;
+        *dbg_im_s = dbg->stride;
 
         for (int32_t i = 0; i < zarray_size_cuda(td->tag_families); i++) {
             apriltag_family_cuda_t f;
@@ -1123,54 +1185,6 @@ __global__ void apriltag_detector_detect_cuda(apriltag_detector_cuda_t *td, imag
     }
 
     return;
-    
-    if (td->quad_sigma != 0) {
-        // compute a reasonable kernel width by figuring that the
-        // kernel should go out 2 std devs.
-        //
-        // max sigma          ksz
-        // 0.499              1  (disabled)
-        // 0.999              3
-        // 1.499              5
-        // 1.999              7
-
-        float sigma = fabsf((float) td->quad_sigma);
-
-        int ksz = 4 * sigma; // 2 std devs in each direction
-        if ((ksz & 1) == 0)
-            ksz++;
-
-        if (ksz > 1) {
-
-            if (td->quad_sigma > 0) {
-                // Apply a blur
-                image_u8_gaussian_blur_cuda(quad_im, sigma, ksz);
-            } else {
-                // SHARPEN the image by subtracting the low frequency components.
-                image_u8_cuda_t *orig = image_u8_copy_cuda(quad_im);
-                image_u8_gaussian_blur_cuda(quad_im, sigma, ksz);
-
-                for (int y = 0; y < orig->height; y++) {
-                    for (int x = 0; x < orig->width; x++) {
-                        int vorig = orig->buf[y*orig->stride + x];
-                        int vblur = quad_im->buf[y*quad_im->stride + x];
-
-                        int v = 2*vorig - vblur;
-                        if (v < 0)
-                            v = 0;
-                        if (v > 255)
-                            v = 255;
-
-                        quad_im->buf[y*quad_im->stride + x] = (uint8_t) v;
-                    }
-                }
-                image_u8_destroy_cuda(orig);
-            }
-        }
-    }
-
-    zarray_cuda_t *quads = apriltag_quad_thresh_cuda(td, quad_im, num_threads);
-
     // adjust centers of pixels so that they correspond to the
     // original full-resolution image.
     if (td->quad_decimate > 1) {

@@ -1462,7 +1462,7 @@ __device__ matd_svd_cuda_t matd_svd_cuda(matd_cuda_t *A)
     return matd_svd_flags_cuda(A, 0);
 }
 
-__device__ matd_svd_cuda_t matd_svd_flags(matd_cuda_t *A, int flags)
+__device__ matd_svd_cuda_t matd_svd_flags_cuda(matd_cuda_t *A, int flags)
 {
     matd_svd_cuda_t res;
 
@@ -1623,7 +1623,7 @@ __device__ matd_cuda_t *matd_plu_p_cuda(const matd_plu_cuda_t *mlu)
     return P;
 }
 
-__device__ matd_cuda_t *matd_plu_l(const matd_plu_cuda_t *mlu)
+__device__ matd_cuda_t *matd_plu_l_cuda(const matd_plu_cuda_t *mlu)
 {
     matd_cuda_t *lu = mlu->lu;
 
@@ -1639,7 +1639,7 @@ __device__ matd_cuda_t *matd_plu_l(const matd_plu_cuda_t *mlu)
     return L;
 }
 
-__device__ matd_cuda_t *matd_plu_u(const matd_plu_cuda_t *mlu)
+__device__ matd_cuda_t *matd_plu_u_cuda(const matd_plu_cuda_t *mlu)
 {
     matd_cuda_t *lu = mlu->lu;
 
