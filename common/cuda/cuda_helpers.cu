@@ -302,3 +302,43 @@ __device__ void quick_sort_ascending_cuda(double arr[], int low, int high) {
         quick_sort_ascending_cuda(arr, pi + 1, high);
     }
 }
+
+__host__ __device__ uint32_t compute_buf_hash_cuda(void *buf, uint32_t buf_size)
+{
+    register uint8_t *ubuf = (uint8_t *) buf;
+    unsigned long hash = 5381;
+    int c;
+
+    for (int i = 0; i < buf_size; i++) {
+        c = ubuf[i];
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    }
+
+    return hash;
+}
+
+__host__ __device__ uint32_t compute_image_hash_cuda(image_u8_cuda_t *im) 
+{
+    unsigned long hash = 5381;
+    int c;
+
+    for (int i = 0; i < im->stride * im->height; i++) {
+        c = im->buf[i];
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    }
+
+    return hash;
+}
+
+__host__ __device__ uint32_t compute_image8x3_hash_cuda(image_u8x3_cuda_t *im) 
+{
+    unsigned long hash = 5381;
+    int c;
+
+    for (int i = 0; i < im->stride * im->height; i++) {
+        c = im->buf[i];
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    }
+
+    return hash;
+}

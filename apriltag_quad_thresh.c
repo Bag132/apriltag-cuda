@@ -1200,6 +1200,34 @@ void do_threshold_task(void *p)
     }
 }
  
+uint32_t compute_buf_hash(void *buf, uint32_t buf_size)
+{
+    register uint8_t *ubuf = (uint8_t *) buf;
+    unsigned long hash = 5381;
+    int c;
+
+    for (int i = 0; i < buf_size; i++) {
+        c = ubuf[i];
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    }
+
+    return hash;
+}
+
+static uint32_t compute_image_hash(image_u8_t *im) 
+{
+    unsigned long hash = 5381;
+    int c;
+
+    for (int i = 0; i < im->stride * im->height; i++) {
+        c = im->buf[i];
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    }
+
+    return hash;
+}
+
+
 image_u8_t *threshold(apriltag_detector_t *td, image_u8_t *im)
 {
     int w = im->width, h = im->height, s = im->stride;
@@ -1242,6 +1270,7 @@ image_u8_t *threshold(apriltag_detector_t *td, image_u8_t *im)
     uint8_t *im_max = calloc(tw*th, sizeof(uint8_t));
     uint8_t *im_min = calloc(tw*th, sizeof(uint8_t));
 
+    printf("CPU: minmax th = %d\n", th);
     struct minmax_task *minmax_tasks = malloc(sizeof(struct minmax_task)*th);
     // first, collect min/max statistics for each tile
     for (int ty = 0; ty < th; ty++) {
@@ -1254,6 +1283,10 @@ image_u8_t *threshold(apriltag_detector_t *td, image_u8_t *im)
     }
     workerpool_run(td->wp);
     free(minmax_tasks);
+
+    // uint32_t im_max_hash = compute_buf_hash(im_max, tw * th * sizeof(uint8_t));
+    // uint32_t im_min_hash = compute_buf_hash(im_min, tw * th * sizeof(uint8_t));
+    // printf("CPU: minmax im_max: 0x%X, im_min: 0x%X\n", im_max_hash, im_min_hash);
 
     // second, apply 3x3 max/min convolution to "blur" these values
     // over larger areas. This reduces artifacts due to abrupt changes
@@ -1279,6 +1312,10 @@ image_u8_t *threshold(apriltag_detector_t *td, image_u8_t *im)
         free(im_min);
         im_max = im_max_tmp;
         im_min = im_min_tmp;
+
+        // uint32_t im_max_hash = compute_buf_hash(im_max, tw * th * sizeof(uint8_t));
+        // uint32_t im_min_hash = compute_buf_hash(im_min, tw * th * sizeof(uint8_t));
+        // printf("CPU: blur im_max: 0x%X, im_min: 0x%X\n", im_max_hash, im_min_hash);
     }
 
     struct threshold_task *threshold_tasks = malloc(sizeof(struct threshold_task)*th);
@@ -1294,6 +1331,11 @@ image_u8_t *threshold(apriltag_detector_t *td, image_u8_t *im)
     }
     workerpool_run(td->wp);
     free(threshold_tasks);
+
+    // im_max_hash = compute_buf_hash(im_max, tw * th * sizeof(uint8_t));
+    // im_min_hash = compute_buf_hash(im_min, tw * th * sizeof(uint8_t));
+    // uint32_t threshim_hash = compute_image_hash(threshim); 
+    // printf("CPU: threshold im_max: 0x%X, im_min: 0x%X, threshim: 0x%X\n", im_max_hash, im_min_hash, threshim_hash);
 
     // we skipped over the non-full-sized tiles above. Fix those now.
     if (1) {
@@ -1372,6 +1414,9 @@ image_u8_t *threshold(apriltag_detector_t *td, image_u8_t *im)
     }
 
     timeprofile_stamp(td->tp, "threshold");
+
+    // threshim_hash = compute_image_hash(threshim); 
+    // printf("CPU: returning threshim: 0x%X\n", threshim_hash);
 
     return threshim;
 }
@@ -1495,6 +1540,33 @@ image_u8_t *threshold_bayer(apriltag_detector_t *td, image_u8_t *im)
     return threshim;
 }
 
+uint32_t compute_unionfind_hash(unionfind_t *uf)
+{
+    unsigned long hash = 5381;
+    int c;
+
+    for (int i = 0; i < uf->maxid + 1; i++) {
+        c = uf->parent[i] + uf->size[i];
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    }
+
+    return hash;
+}
+
+uint32_t compute_image8x3_hash(image_u8x3_t *im) 
+{
+    unsigned long hash = 5381;
+    int c;
+
+    for (int i = 0; i < im->stride * im->height; i++) {
+        c = im->buf[i];
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    }
+
+    return hash;
+}
+
+
 unionfind_t* connected_components(apriltag_detector_t *td, image_u8_t* threshim, int w, int h, int ts) {
     unionfind_t *uf = unionfind_create(w * h);
 
@@ -1511,6 +1583,8 @@ unionfind_t* connected_components(apriltag_detector_t *td, image_u8_t* threshim,
         struct unionfind_task *tasks = malloc(sizeof(struct unionfind_task)*(sz / chunksize + 1));
 
         int ntasks = 0;
+        
+        printf("CPU: Chunk size = %d\n", chunksize);
 
         for (int i = 1; i < sz; i += chunksize) {
             // each task will process [y0, y1). Note that this attaches
@@ -1526,16 +1600,29 @@ unionfind_t* connected_components(apriltag_detector_t *td, image_u8_t* threshim,
             tasks[ntasks].uf = uf;
             tasks[ntasks].im = threshim;
 
+            // printf("CPU: Components task %d, y0 = %d, y1 = %d\n", ntasks, tasks[ntasks].y0, imin(sz, i + chunksize - 1));
+
             workerpool_add_task(td->wp, do_unionfind_task2, &tasks[ntasks]);
             ntasks++;
         }
 
         workerpool_run(td->wp);
 
+        uint32_t uf_hash = compute_unionfind_hash(uf);
+        printf("CPU: do_unionfind_task2 hash = 0x%X\n", uf_hash);
+
+        uint32_t threshim_hash = compute_image_hash(threshim);
+        printf("CPU: threshim = 0x%X, w = %d, ts = %d\n", threshim_hash, w, ts);
+
         // XXX stitch together the different chunks.
         for (int i = 1; i < ntasks; i++) {
             do_unionfind_line2(uf, threshim, w, ts, tasks[i].y0 - 1);
+            uint32_t uf_hash = compute_unionfind_hash(uf);
+            // printf("CPU: tasks[%d].y0 - 1 = %d, uf = 0x%X, uf->maxid = %u, *(uf->size) = %u\n", i, tasks[i].y0 - 1, uf_hash, uf->maxid, *(uf->size));
         }
+
+        uf_hash = compute_unionfind_hash(uf);
+        printf("CPU: do_unionfind_line2 hash = 0x%X\n", uf_hash);
 
         free(tasks);
     }
@@ -1755,11 +1842,21 @@ zarray_t* gradient_clusters(apriltag_detector_t *td, image_u8_t* threshim, int w
         tasks[ntasks].nclustermap = nclustermap/(sz / chunksize + 1);
         tasks[ntasks].clusters = zarray_create(sizeof(struct cluster_hash*));
 
+        printf("CPU: Clustering task %d, y0 = %d, y1 = %d, ts = %d, w = %d, nclustermap = %d\n", 
+            ntasks, tasks[ntasks].y0, tasks[ntasks].y1, tasks[ntasks].s, tasks[ntasks].w, tasks[ntasks].nclustermap);
         workerpool_add_task(td->wp, do_cluster_task, &tasks[ntasks]);
         ntasks++;
     }
 
     workerpool_run(td->wp);
+
+    zarray_t *cst = tasks[0].clusters;
+    for (int i = 0; i < zarray_size(cst); i++) {
+        struct cluster_hash chash;
+        zarray_get(cst, i, &chash);
+        printf("CPU: task[0] clusters[%d] = 0x%X\n", i, chash.hash);
+    }
+
 
     zarray_t** clusters_list = malloc(sizeof(zarray_t *)*ntasks);
     for (int i = 0; i < ntasks; i++) {
@@ -1845,6 +1942,28 @@ zarray_t* fit_quads(apriltag_detector_t *td, int w, int h, zarray_t* clusters, i
     return quads;
 }
 
+uint32_t compute_clusters_hash(zarray_t *clusters)
+{
+    unsigned long hash = 5381;
+    int c;
+
+    for (int i = 0; i < zarray_size(clusters); i++) {
+        zarray_t *cluster;
+        zarray_get(clusters, i, &cluster);
+
+        for (int j = 0; j < zarray_size(cluster); j++) {
+            struct pt *p;
+            zarray_get_volatile(cluster, j, &p);
+            c += p->x + p->y + p->gx + p->gy + p->slope;
+        }
+
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+        c = 0;
+    }
+
+    return hash;
+}
+
 zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
 {
     ////////////////////////////////////////////////////////
@@ -1883,9 +2002,19 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
 
                 if (color == 0) {
                     const int bias = 50;
-                    r = bias + (random() % (200-bias));
-                    g = bias + (random() % (200-bias));
-                    b = bias + (random() % (200-bias));
+
+                    uint8_t rand1 = (random() % (200-bias));
+                    uint8_t rand2 = (random() % (200-bias));
+                    uint8_t rand3 = (random() % (200-bias));
+                    // uint8_t rand1 = (uint8_t) (10 * (200-bias));
+                    // uint8_t rand2 = (uint8_t) (20 * (200-bias));
+                    // uint8_t rand3 = (uint8_t) (30 * (200-bias));
+
+                    // printf("CPU: rand1 = %u, rand2 = %u, rand3 = %u\n", rand1, rand2, rand3);
+
+                    r = bias + rand1;
+                    g = bias + rand2;
+                    b = bias + rand3;
                     colors[v] = (r << 16) | (g << 8) | b;
                 }
 
@@ -1897,6 +2026,11 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
 
         free(colors);
 
+        uint32_t dbg_hash = compute_image8x3_hash(d);
+        uint32_t uf_hash = compute_unionfind_hash(uf);
+        printf("CPU: Connected components ret = 0x%X, returning debug image: 0x%X, w = %d, s = %d, h = %d\n", 
+            uf_hash, dbg_hash, d->width, d->stride, d->height);
+
         image_u8x3_write_pnm(d, "debug_segmentation.pnm");
         image_u8x3_destroy(d);
     }
@@ -1904,6 +2038,7 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
 
     timeprofile_stamp(td->tp, "unionfind");
 
+    // Returns zarray of 
     zarray_t* clusters = gradient_clusters(td, threshim, w, h, ts, uf);
 
     if (td->debug) {
@@ -1933,6 +2068,10 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
                 d->buf[y*d->stride + 3*x + 2] = b;
             }
         }
+        
+        uint32_t chash = compute_clusters_hash(clusters);
+        uint32_t dbg_hash = compute_image8x3_hash(d);
+        printf("CPU: gradient_cluster hash = 0x%X, dbg image hash = 0x%X\n", chash, dbg_hash);
 
         image_u8x3_write_pnm(d, "debug_clusters.pnm");
         image_u8x3_destroy(d);

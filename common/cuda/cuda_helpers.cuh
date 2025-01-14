@@ -1,6 +1,10 @@
 #pragma once
 
-extern __host__ __device__ void *calloc_cuda(size_t nmemb, size_t size);
+#include <stdint.h>
+// #include "common/cuda/unionfind_cuda.cuh"
+#include "common/cuda/image_u8_cuda.cuh"
+
+__host__ __device__ void *calloc_cuda(size_t nmemb, size_t size);
 
 __host__ __device__ void *realloc_cuda(void *old_ptr, size_t old_ptr_size, size_t size);
 
@@ -25,3 +29,9 @@ __device__ int isdigit_cuda(int x);
 __device__ void quick_sort_descending_cuda(double arr[], int low, int high);
 
 __device__ void quick_sort_ascending_cuda(double arr[], int low, int high);
+
+__host__ __device__ uint32_t compute_buf_hash_cuda(void *buf, uint32_t buf_size);
+
+__host__ __device__ uint32_t compute_image_hash_cuda(image_u8_cuda_t *im);
+
+__host__ __device__ uint32_t compute_image8x3_hash_cuda(image_u8x3_cuda_t *im);

@@ -48,6 +48,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 // #include "common/timeprofile.h"
 #include "common/cuda/math_util_cuda.cuh"
 #include "common/cuda/g2d_cuda.cuh"
+#include "common/cuda/unionfind_cuda.cuh"
 // #include "common/debug_print.h"
 
 #include "cuda_helpers.cuh"
@@ -81,7 +82,7 @@ static inline long int random(void)
 
 #define APRILTAG_U64_ONE ((uint64_t) 1)
 
-__device__ extern zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im, int32_t num_threads, image_u8_cuda_t **dbg);
+__device__ extern zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im, int32_t num_threads, image_u8x3_cuda_t **dbg);
 
 // Regresses a model of the form:
 // intensity(x,y) = C0*x + C1*y + CC2
@@ -1060,6 +1061,19 @@ __device__ uint32_t compute_image_hash(image_u8_cuda_t *im)
     return hash;
 }
 
+// __device__ uint32_t compute_image8x3_hash_cuda(image_u8x3_cuda_t *im) 
+// {
+//     unsigned long hash = 5381;
+//     int c;
+
+//     for (int i = 0; i < im->stride * im->height; i++) {
+//         c = im->buf[i];
+//         hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+//     }
+
+//     return hash;
+// }
+
 // __device__ uint32_t compute_buf_hash(void *buf, uint32_t buf_size) // TODO: deal with other hash func
 // {
 //     register uint8_t *ubuf = (uint8_t *) buf;
@@ -1160,15 +1174,13 @@ __global__ void apriltag_detector_detect_cuda(apriltag_detector_cuda_t *td, imag
 
     __syncthreads();
     
-    image_u8_cuda_t *dbg;
-    if (threadIdx.x == 0) {
-        printf("Entering apriltag_quad_thresh_cuda\n");
-    }
+    image_u8x3_cuda_t *dbg;
+
     zarray_cuda_t *quads = apriltag_quad_thresh_cuda(td, quad_im, num_threads, &dbg);
 
     if (threadIdx.x == 0) {
-        uint32_t dbg_im_hash = compute_image_hash(dbg);
-        printf("GPU: Returning threshold image, width: %d, stride: %d, height %d, buf: 0x%X\n", dbg->width, dbg->stride, dbg->height, dbg_im_hash);
+        uint32_t dbg_im_hash = compute_image8x3_hash_cuda(dbg);
+        printf("GPU: Returning segmentation image, width: %d, stride: %d, height %d, buf: 0x%X\n", dbg->width, dbg->stride, dbg->height, dbg_im_hash);
 
         uint32_t buf_size = dbg->stride * dbg->height;
         memcpy(dbg_im_buf, dbg->buf, buf_size);

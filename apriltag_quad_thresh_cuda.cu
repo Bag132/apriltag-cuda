@@ -47,6 +47,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include "common/cuda/zmaxheap_cuda.cuh"
 // #include "common/postscript_utils.h"
 #include "common/cuda/math_util_cuda.cuh"
+#include <curand_kernel.h>
 
 #include "common/cuda/cuda_helpers.cuh"
 
@@ -1064,39 +1065,93 @@ __device__ void img_create_alignment(uint32_t width_in, uint32_t height_in, uint
 
 #define DO_UNIONFIND2_CUDA(dx, dy) if (im->buf[(y + dy)*s + x + dx] == v) unionfind_connect_cuda(uf, y*w + x, (y + dy)*w + x + dx);
 
-__device__ void do_unionfind_first_line_cuda(unionfind_cuda_t *uf, uint8_t *im, int32_t w, int32_t s)
+__device__ void do_unionfind_first_line_cuda(unionfind_cuda_t *uf, image_u8_cuda_t *im, int32_t w, int32_t s)
 {
     int y = 0;
     uint8_t v;
 
     for (int x = 1; x < w - 1; x++) {
-        v = im[y*s + x];
+        v = im->buf[y*s + x];
 
         if (v == 127)
             continue;
 
-        const uint32_t dx = -1;
-        const uint32_t dy = 0;
-        if (im[(y + dy)*s + x + dx] == v) unionfind_connect_cuda(uf, y*w + x, (y + dy)*w + x + dx);
+        DO_UNIONFIND2_CUDA(-1, 0);
     }
 }
 
-__device__ void do_unionfind_line2_cuda(unionfind_cuda_t *uf, uint8_t *im, int w, int s, int y)
+// __device__ void do_unionfind_line2_cuda(unionfind_cuda_t *uf, uint8_t *im, int w, int s, int y)
+// {
+//     assert(y > 0);
+
+//     uint8_t v_m1_m1;
+//     uint8_t v_0_m1 = im[(y - 1)*s];
+//     uint8_t v_1_m1 = im[(y - 1)*s + 1];
+//     uint8_t v_m1_0;
+//     uint8_t v = im[y*s];
+
+//     for (int x = 1; x < w - 1; x++) {
+//         v_m1_m1 = v_0_m1;
+//         v_0_m1 = v_1_m1;
+//         v_1_m1 = im[(y - 1)*s + x + 1];
+//         v_m1_0 = v;
+//         v = im[y*s + x];
+
+//         if (v == 127)
+//             continue;
+
+//         // (dx,dy) pairs for 8 connectivity:
+//         // (-1, -1)    (0, -1)    (1, -1)
+//         // (-1, 0)    (REFERENCE)
+
+//         // DO_UNIONFIND2(-1, 0);
+//         uint32_t dx = -1;
+//         uint32_t dy = 0;
+//         if (im[(y + dy)*s + x + dx] == v) unionfind_connect_cuda(uf, y*w + x, (y + dy)*w + x + dx);
+
+
+//         if (x == 1 || !((v_m1_0 == v_m1_m1) && (v_m1_m1 == v_0_m1))) {
+//             // DO_UNIONFIND2(0, -1);
+//             dx = 0;
+//             dy = -1;
+//             if (im[(y + dy)*s + x + dx] == v) unionfind_connect_cuda(uf, y*w + x, (y + dy)*w + x + dx);
+
+//         }
+
+//         if (v == 255) {
+//             if (x == 1 || !(v_m1_0 == v_m1_m1 || v_0_m1 == v_m1_m1) ) {
+//                 // DO_UNIONFIND2(-1, -1);
+//                 dx = -1;
+//                 dy = -1;
+//                 if (im[(y + dy)*s + x + dx] == v) unionfind_connect_cuda(uf, y*w + x, (y + dy)*w + x + dx);
+
+//             }
+//             if (!(v_0_m1 == v_1_m1)) {
+//                 // DO_UNIONFIND2(1, -1);
+//                 dx = 1;
+//                 dy = -1;
+//                 if (im[(y + dy)*s + x + dx] == v) unionfind_connect_cuda(uf, y*w + x, (y + dy)*w + x + dx);
+//             }
+//         }
+//     }
+// }
+
+__device__ static void do_unionfind_line2_cuda(unionfind_cuda_t *uf, image_u8_cuda_t *im, int w, int s, int y)
 {
     assert(y > 0);
 
     uint8_t v_m1_m1;
-    uint8_t v_0_m1 = im[(y - 1)*s];
-    uint8_t v_1_m1 = im[(y - 1)*s + 1];
+    uint8_t v_0_m1 = im->buf[(y - 1)*s];
+    uint8_t v_1_m1 = im->buf[(y - 1)*s + 1];
     uint8_t v_m1_0;
-    uint8_t v = im[y*s];
+    uint8_t v = im->buf[y*s];
 
     for (int x = 1; x < w - 1; x++) {
         v_m1_m1 = v_0_m1;
         v_0_m1 = v_1_m1;
-        v_1_m1 = im[(y - 1)*s + x + 1];
+        v_1_m1 = im->buf[(y - 1)*s + x + 1];
         v_m1_0 = v;
-        v = im[y*s + x];
+        v = im->buf[y*s + x];
 
         if (v == 127)
             continue;
@@ -1104,51 +1159,47 @@ __device__ void do_unionfind_line2_cuda(unionfind_cuda_t *uf, uint8_t *im, int w
         // (dx,dy) pairs for 8 connectivity:
         // (-1, -1)    (0, -1)    (1, -1)
         // (-1, 0)    (REFERENCE)
-
-        // DO_UNIONFIND2(-1, 0);
-        uint32_t dx = -1;
-        uint32_t dy = 0;
-        if (im[(y + dy)*s + x + dx] == v) unionfind_connect_cuda(uf, y*w + x, (y + dy)*w + x + dx);
-
+        DO_UNIONFIND2_CUDA(-1, 0);
 
         if (x == 1 || !((v_m1_0 == v_m1_m1) && (v_m1_m1 == v_0_m1))) {
-            // DO_UNIONFIND2(0, -1);
-            dx = 0;
-            dy = -1;
-            if (im[(y + dy)*s + x + dx] == v) unionfind_connect_cuda(uf, y*w + x, (y + dy)*w + x + dx);
-
+            DO_UNIONFIND2_CUDA(0, -1);
         }
 
         if (v == 255) {
             if (x == 1 || !(v_m1_0 == v_m1_m1 || v_0_m1 == v_m1_m1) ) {
-                // DO_UNIONFIND2(-1, -1);
-                dx = -1;
-                dy = -1;
-                if (im[(y + dy)*s + x + dx] == v) unionfind_connect_cuda(uf, y*w + x, (y + dy)*w + x + dx);
-
+                DO_UNIONFIND2_CUDA(-1, -1);
             }
             if (!(v_0_m1 == v_1_m1)) {
-                // DO_UNIONFIND2(1, -1);
-                dx = 1;
-                dy = -1;
-                if (im[(y + dy)*s + x + dx] == v) unionfind_connect_cuda(uf, y*w + x, (y + dy)*w + x + dx);
+                DO_UNIONFIND2_CUDA(1, -1);
             }
         }
     }
 }
+
 #undef DO_UNIONFIND2
 
 
-__device__ void do_unionfind_task2_cuda(unionfind_cuda_t *uf, uint8_t *im, int32_t w, int32_t s, int32_t y0, int32_t y1)
+__device__ void do_unionfind_task2_cuda(unionfind_cuda_t *uf, image_u8_cuda_t *im, int32_t w, int32_t s, int32_t y0, int32_t y1)
 {
     for (int y = y0; y < y1; y++) {
         do_unionfind_line2_cuda(uf, im, w, s, y);
     }
 }
 
+__device__ uint32_t compute_unionfind_hash_cuda(unionfind_cuda_t *uf)
+{
+    unsigned long hash = 5381;
+    int c;
 
+    for (int i = 0; i < uf->maxid + 1; i++) {
+        c = uf->parent[i] + uf->size[i];
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    }
 
-__device__ unionfind_cuda_t *connected_components_cuda(uint8_t *threshim, uint32_t w, uint32_t h, uint32_t ts, uint32_t num_threads)
+    return hash;
+}
+
+__device__ unionfind_cuda_t *connected_components_cuda(image_u8_cuda_t *threshim, uint32_t w, uint32_t h, uint32_t ts, uint32_t num_threads)
 {
     __shared__ unionfind_cuda_t *uf;
     
@@ -1157,24 +1208,62 @@ __device__ unionfind_cuda_t *connected_components_cuda(uint8_t *threshim, uint32
         do_unionfind_first_line_cuda(uf, threshim, w, ts);
     }
 
+    __syncthreads();
+
     if (threadIdx.x < h) {
         int32_t row_chunk_size;
         if (num_threads > h) {
             row_chunk_size = 1;
         } else {
-            row_chunk_size = h / num_threads;
+            row_chunk_size = 1+ h / num_threads;
+        }
+
+        if (threadIdx.x == 0) {
+            printf("GPU: Chunk size = %d\n", row_chunk_size);
         }
 
         int32_t row_start = row_chunk_size * threadIdx.x + 1;
-        int32_t row_end = row_start + row_chunk_size + 1;
+        // if (threadIdx.x != 0) {
+        //     ++row_start;
+        // }
+        int32_t row_end = MIN(row_start + row_chunk_size-1, h);
+
 
         __syncthreads();
         
-        do_unionfind_task2_cuda(uf, threshim, w, ts, row_start, row_end > h ? h : row_end);
+        if (row_start < h) {
+            // printf("GPU: thread %d, row_start = %d, row_end = %d\n", threadIdx.x, row_start, row_end);
+            do_unionfind_task2_cuda(uf, threshim, w, ts, row_start, row_end);
+        } else {
+            printf("GPU: Excluded thread %d\n", threadIdx.x);
+        }
+        
+        if (threadIdx.x == 0) {
+            uint32_t uf_hash = compute_unionfind_hash_cuda(uf);
+            printf("GPU: do_unionfind_task2 hash = 0x%X\n", uf_hash);
+        }
 
-        __syncthreads();    
+        __syncthreads();
 
-        do_unionfind_line2_cuda(uf, threshim, w, ts, row_start - 1);
+        uint32_t threshim_hash = compute_image_hash_cuda(threshim);
+        uint32_t it = 0;
+
+        if (threadIdx.x == 0) {
+            for (int i = 1; i < num_threads - 1; i++) {
+                int32_t row = row_chunk_size * i + 1;
+                // printf("GPU: thread %d, row - 1 = %d\n", i, row - 1);
+                do_unionfind_line2_cuda(uf, threshim, w, ts, row - 1);
+                uint32_t uf_hash = compute_unionfind_hash_cuda(uf);
+                // printf("GPU: thread %d row - 1 = %d, uf = 0x%X, uf->maxid = %u, *(uf->size) = %u\n", threadIdx.x, row - 1, uf_hash, uf->maxid, *(uf->size));
+
+            }
+        }
+
+        if (threadIdx.x == 0) {
+            uint32_t uf_hash = compute_unionfind_hash_cuda(uf);
+            printf("GPU: do_unionfind_line2_cuda hash = 0x%X\n", uf_hash);
+        }
+
     }
 
     __syncthreads();
@@ -1306,37 +1395,33 @@ __device__ zarray_cuda_t* do_gradient_clusters_cuda(image_u8_cuda_t* threshim, i
     return clusters;
 }
 
+__device__ uint32_t compute_clusters_hash_cuda(zarray_cuda_t *clusters)
+{
+    unsigned long hash = 5381;
+    int c;
+
+    for (int i = 0; i < zarray_size_cuda(clusters); i++) {
+        zarray_cuda_t *cluster;
+        zarray_get_cuda(clusters, i, &cluster);
+
+        for (int j = 0; j < zarray_size_cuda(cluster); j++) {
+            struct pt *p;
+            zarray_get_volatile_cuda(cluster, j, &p);
+            c += p->x + p->y + p->gx + p->gy + p->slope;
+        }
+
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+        c = 0;
+    }
+
+    return hash;
+}
+
 __device__ zarray_cuda_t* gradient_clusters_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t* threshim, int w, int h, int ts, unionfind_cuda_t* uf, uint32_t num_threads) {
-    zarray_cuda_t* clusters;
+    __shared__ zarray_cuda_t* clusters;
     int nclustermap = 0.2*w*h;
 
     int sz = h - 1;
-
-/*
-    int chunksize = 1 + sz / (APRILTAG_TASKS_PER_THREAD_TARGET * td->nthreads);
-    struct cluster_task *tasks = (struct cluster_task *) malloc(sizeof(struct cluster_task)*(sz / chunksize + 1));
-
-    int ntasks = 0;
-
-    for (int i = 1; i < sz; i += chunksize) {
-        // each task will process [y0, y1). Note that this processes
-        // each cell to the right and down.
-        tasks[ntasks].y0 = i;
-        tasks[ntasks].y1 = imin(sz, i + chunksize);
-        tasks[ntasks].w = w;
-        tasks[ntasks].s = ts;
-        tasks[ntasks].uf = uf;
-        tasks[ntasks].im = threshim;
-        tasks[ntasks].nclustermap = nclustermap/(sz / chunksize + 1);
-        tasks[ntasks].clusters = zarray_cuda_create(sizeof(struct cluster_hash*));
-
-
-        workerpool_add_task(td->wp, do_cluster_task, &tasks[ntasks]);
-        ntasks++;
-    }
-
-    workerpool_run(td->wp);
-*/
 
     int32_t chunksize;
     if (num_threads >= sz) {
@@ -1345,20 +1430,39 @@ __device__ zarray_cuda_t* gradient_clusters_cuda(apriltag_detector_cuda_t *td, i
         chunksize = 1 + sz / num_threads;
     }
     
-    zarray_cuda_t** clusters_list;
+    __shared__ zarray_cuda_t** clusters_list;
     int32_t cluster_list_len = num_threads > sz ? sz : num_threads;
     if (threadIdx.x == 0) {
         clusters_list = (zarray_cuda_t **) malloc(sizeof(zarray_cuda_t *) * cluster_list_len);
     }
 
+    __syncthreads();
     if (threadIdx.x < sz) {
         int32_t y0 = chunksize * threadIdx.x;
         int32_t y1 = y0 + chunksize;
+
+        ++y0;
+        ++y1;
+        
         y1 = y1 > sz ? sz : y1;
+
         __syncthreads();
-        zarray_cuda_t *clusters = do_gradient_clusters_cuda(threshim, ts, y0, y1, w, nclustermap/(sz / chunksize + 1), uf, zarray_create_cuda(sizeof(struct cluster_hash*)));
+
+        int ncmap = nclustermap / (sz / chunksize + 1);
+
+        printf("GPU: Clustering thread %d y0 = %d y1 = %d, ts = %d, w = %d, nclustermap = %d\n", threadIdx.x, y0, y1, ts, w, ncmap);
+        zarray_cuda_t *clusters = do_gradient_clusters_cuda(threshim, ts, y0, y1, w, ncmap, uf, zarray_create_cuda(sizeof(struct cluster_hash*)));
+        if (threadIdx.x == 0) {
+            for (int i = 0; i < zarray_size_cuda(clusters); i++) {
+                struct cluster_hash chash;
+                zarray_get_cuda(clusters, i, &chash);
+                printf("GPU: thread %d clusters[%d] = 0x%X\n", threadIdx.x, i, chash.hash);
+            }
+        }
         clusters_list[threadIdx.x] = clusters;
     }
+
+    __syncthreads(); 
 
     if (threadIdx.x == 0) {
         int length = cluster_list_len;
@@ -1376,14 +1480,18 @@ __device__ zarray_cuda_t* gradient_clusters_cuda(apriltag_detector_cuda_t *td, i
             length = (length >> 1) + length % 2;
         }
 
-        clusters = zarray_create_cuda(sizeof(zarray_cuda_t*));
-        zarray_ensure_capacity_cuda(clusters, zarray_size_cuda(clusters_list[0]));
+        if (threadIdx.x == 0) {
+            clusters = zarray_create_cuda(sizeof(zarray_cuda_t*));
+            zarray_ensure_capacity_cuda(clusters, zarray_size_cuda(clusters_list[0]));
+        }
+
         for (int i = 0; i < zarray_size_cuda(clusters_list[0]); i++) {
             struct cluster_hash** hash;
             zarray_get_volatile_cuda(clusters_list[0], i, &hash);
             zarray_add_cuda(clusters, &(*hash)->data);
             free(*hash);
         }
+
         zarray_destroy_cuda(clusters_list[0]);
         free(clusters_list);
     }
@@ -1392,7 +1500,6 @@ __device__ zarray_cuda_t* gradient_clusters_cuda(apriltag_detector_cuda_t *td, i
 
 __device__ void minmax_task_cuda(image_u8_cuda_t *im, uint8_t *im_max, uint8_t *im_min, int32_t ty_start, int32_t ty_end) 
 {
-    return;
     const int tile_size = 4;
 
     // Tiled img width 
@@ -1519,20 +1626,8 @@ __device__ void threshold_task_cuda(image_u8_cuda_t *im, image_u8_cuda_t *thresh
     }
 }
 
-__device__ uint32_t compute_buf_hash_cuda(void *buf, uint32_t buf_size)
-{
-    register uint8_t *ubuf = (uint8_t *) buf;
-    unsigned long hash = 5381;
-    int c;
 
-    for (int i = 0; i < buf_size; i++) {
-        c = ubuf[i];
-        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
-    }
-
-    return hash;
-
-}
+// void syncthreads(int32_t num_threads) 
 
 __device__ image_u8_cuda_t *threshold_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im, int32_t num_threads) 
 {
@@ -1550,7 +1645,7 @@ __device__ image_u8_cuda_t *threshold_cuda(apriltag_detector_cuda_t *td, image_u
     __shared__ uint8_t *im_min_tmp;
 
     if (threadIdx.x == 0) {
-        printf("Creating threshim\n");
+        // printf("GPU: Creating threshim\n");
         threshim = image_u8_create_alignment_cuda(w, h, s); 
         im_max = (uint8_t *) calloc_cuda(tw*th, sizeof(uint8_t));
         im_min = (uint8_t *) calloc_cuda(tw*th, sizeof(uint8_t));
@@ -1558,7 +1653,7 @@ __device__ image_u8_cuda_t *threshold_cuda(apriltag_detector_cuda_t *td, image_u
         im_min_tmp = (uint8_t *) calloc_cuda(tw*th, sizeof(uint8_t));
     }
 
-    if (threadIdx.x < th) { // FIXME: Can't have __syncthreads inside if
+    if (threadIdx.x < th) { // FIXME: Illegal. Can't have __syncthreads inside if
         int32_t row_chunk_size;
         if (num_threads > th) {
             row_chunk_size = 1;
@@ -1569,25 +1664,18 @@ __device__ image_u8_cuda_t *threshold_cuda(apriltag_detector_cuda_t *td, image_u
         int32_t row_start = row_chunk_size * threadIdx.x;
         int32_t row_end = MIN(row_start + row_chunk_size, th);
 
-        if (threadIdx.x == 0 || threadIdx.x == 11) {
-            printf("thread %d minmax im height = %d, row_start = %d, row_end = %d\n", threadIdx.x, th, row_start, row_end);
-        }
-        // printf("Reached %d\n", threadIdx.x);
-        // return NULL;
-        // __syncthreads(); // FIXME: Jets
-        // return NULL;
+        __syncthreads(); // FIXME: Jets
+
         minmax_task_cuda(im, im_max, im_min, row_start, row_end);
-        // return NULL;
-        // __syncthreads();
 
-        if (threadIdx.x == 0) {
-            printf("minmax done\n");
-            uint32_t im_max_hash = compute_buf_hash_cuda(im_max, tw * th * sizeof(uint8_t));
-            uint32_t im_min_hash = compute_buf_hash_cuda(im_min, tw * th * sizeof(uint8_t));
-            printf("GPU: minmax im_max: 0x%X, im_min: 0x%X\n", im_max_hash, im_min_hash);
-        }
+        __syncthreads();
 
-        return NULL;
+        // if (threadIdx.x == 0) {
+        //     uint32_t im_max_hash = compute_buf_hash_cuda(im_max, tw * th * sizeof(uint8_t));
+        //     uint32_t im_min_hash = compute_buf_hash_cuda(im_min, tw * th * sizeof(uint8_t));
+        //     printf("GPU: minmax im_max: 0x%X, im_min: 0x%X\n", im_max_hash, im_min_hash);
+        // }
+
         blur_task_cuda(im, im_max, im_min, im_max_tmp, im_min_tmp, row_start, row_end);
 
         __syncthreads();
@@ -1597,11 +1685,24 @@ __device__ image_u8_cuda_t *threshold_cuda(apriltag_detector_cuda_t *td, image_u
             free(im_min);
             im_max = im_max_tmp;
             im_min = im_min_tmp;
+
+            uint32_t im_max_hash = compute_buf_hash_cuda(im_max, tw * th * sizeof(uint8_t));
+            uint32_t im_min_hash = compute_buf_hash_cuda(im_min, tw * th * sizeof(uint8_t));
+            printf("GPU: blur im_max: 0x%X, im_min: 0x%X\n", im_max_hash, im_min_hash);
         }
 
         __syncthreads();
 
         threshold_task_cuda(im, threshim, im_max, im_min, td, row_start, row_end);
+
+        __syncthreads();
+
+        // if (threadIdx.x == 0) {
+        //     uint32_t im_max_hash = compute_buf_hash_cuda(im_max, tw * th * sizeof(uint8_t));
+        //     uint32_t im_min_hash = compute_buf_hash_cuda(im_min, tw * th * sizeof(uint8_t));
+        //     uint32_t threshim_hash = compute_image_hash_cuda(threshim); 
+        //     printf("GPU: threshold im_max: 0x%X, im_min: 0x%X, threshim: 0x%X\n", im_max_hash, im_min_hash, threshim_hash);
+        // }
     } else {
         printf("Skipped thresholding\n");
     }
@@ -1685,10 +1786,15 @@ __device__ image_u8_cuda_t *threshold_cuda(apriltag_detector_cuda_t *td, image_u
 
     __syncthreads();
 
+    // if (threadIdx.x == 0) {
+    //     uint32_t threshim_hash = compute_image_hash_cuda(threshim); 
+    //     printf("GPU: returning threshim: 0x%X\n", threshim_hash);
+    // }
+
     return threshim;
 }
 
-__device__ zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im, int32_t num_threads, image_u8_cuda_t **dbg)
+__device__ zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_cuda_t *td, image_u8_cuda_t *im, int32_t num_threads, image_u8x3_cuda_t **dbg)
 {
     ////////////////////////////////////////////////////////
     // step 1. threshold the image, creating the edge image.
@@ -1698,15 +1804,12 @@ __device__ zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_cuda_t *td
     __shared__ image_u8_cuda_t *threshim;
 
     if (threadIdx.x == 0) {
-        printf("thresholding\n");
         threshim = threshold_cuda(td, im, num_threads);
     } else {
         threshold_cuda(td, im, num_threads);
     }
 
-    return NULL;
-
-    *dbg = threshim;
+    // *dbg = threshim;
 
 
     int ts = threshim->stride;
@@ -1717,12 +1820,75 @@ __device__ zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_cuda_t *td
     __shared__ unionfind_cuda_t *uf;
     __syncthreads();
     if (threadIdx.x == 0) {
-        uf = connected_components_cuda(threshim->buf, w, h, ts, num_threads);
+        uf = connected_components_cuda(threshim, w, h, ts, num_threads);
     } else {
-        connected_components_cuda(threshim->buf, w, h, ts, num_threads);
+        connected_components_cuda(threshim, w, h, ts, num_threads);
     }
 
+    __syncthreads();
+
+
+    if (threadIdx.x == 0) {
+
+        if (0) {
+            curandState_t state;
+            curand_init(1234, threadIdx.x, 0, &state);
+            
+            image_u8x3_cuda_t *d = image_u8x3_create_cuda(w, h);
+
+            uint32_t *colors = (uint32_t*) calloc_cuda(w*h, sizeof(*colors));
+
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    uint32_t v = unionfind_get_representative_cuda(uf, y*w+x);
+
+                    if ((int)unionfind_get_set_size_cuda(uf, v) < td->qtp.min_cluster_pixels)
+                        continue;
+
+                    uint32_t color = colors[v];
+                    uint8_t r = color >> 16,
+                        g = color >> 8,
+                        b = color;
+
+                    if (color == 0) {
+                        const int bias = 50;
+                        uint8_t rand1 = (uint8_t) (curand_uniform(&state) * (200-bias));
+                        uint8_t rand2 = (uint8_t) (curand_uniform(&state) * (200-bias));
+                        uint8_t rand3 = (uint8_t) (curand_uniform(&state) * (200-bias));
+                        // uint8_t rand1 = (uint8_t) (10 * (200-bias));
+                        // uint8_t rand2 = (uint8_t) (20 * (200-bias));
+                        // uint8_t rand3 = (uint8_t) (30 * (200-bias));
+
+                        // printf("GPU: rand1 = %u, rand2 = %u, rand3 = %u\n", rand1, rand2, rand3);
+
+                        r = bias + rand1;
+                        g = bias + rand2;
+                        b = bias + rand3;
+                        colors[v] = (r << 16) | (g << 8) | b;
+                    }
+
+                    d->buf[y*d->stride + 3*x + 0] = r;
+                    d->buf[y*d->stride + 3*x + 1] = g;
+                    d->buf[y*d->stride + 3*x + 2] = b;
+                }
+            }
+
+            free(colors);
+
+            *dbg = d;
+
+            uint32_t dbg_hash = compute_image8x3_hash_cuda(*dbg);
+            printf("GPU: thread 0 Connected components debug image: 0x%X, w = %d, s = %d, h = %d\n", 
+                dbg_hash, (*dbg)->width, (*dbg)->stride, (*dbg)->height);
+        }
+    }
     
+    if (threadIdx.x == 0 || threadIdx.x == 2) {
+        uint32_t uf_hash = compute_unionfind_hash_cuda(uf);
+        printf("GPU: thread %d Connected components ret = 0x%X\n", threadIdx.x, uf_hash);
+    }
+    __syncthreads();
+
     __shared__ zarray_cuda_t* clusters;
     __syncthreads();
     if (threadIdx.x == 0) {
@@ -1732,6 +1898,64 @@ __device__ zarray_cuda_t *apriltag_quad_thresh_cuda(apriltag_detector_cuda_t *td
     }
 
     __syncthreads();
+
+    if (threadIdx.x == 0 || threadIdx.x == 2) {
+        uint32_t chash = compute_clusters_hash_cuda(clusters);
+        printf("GPU: thread %d clusters = 0x%X, gradient_cluster hash = 0x%X\n", threadIdx.x, clusters, chash);
+    }
+
+    if (threadIdx.x == 0) {
+        if (1) {
+            curandState_t state;
+            curand_init(1234, threadIdx.x, 0, &state);
+
+            image_u8x3_cuda_t *d = image_u8x3_create_cuda(w, h);
+
+            for (int i = 0; i < zarray_size_cuda(clusters); i++) {
+                zarray_cuda_t *cluster;
+                zarray_get_cuda(clusters, i, &cluster);
+
+                uint32_t r, g, b;
+
+                if (1) {
+                    const int bias = 50;
+                    uint8_t rand1 = (uint8_t) (curand_uniform(&state) * (200-bias));
+                    uint8_t rand2 = (uint8_t) (curand_uniform(&state) * (200-bias));
+                    uint8_t rand3 = (uint8_t) (curand_uniform(&state) * (200-bias));
+                    // uint8_t rand1 = (uint8_t) (10 * (200-bias));
+                    // uint8_t rand2 = (uint8_t) (20 * (200-bias));
+                    // uint8_t rand3 = (uint8_t) (30 * (200-bias));
+
+                    r = bias + rand1;
+                    g = bias + rand2;
+                    b = bias + rand3;
+                }
+
+                for (int j = 0; j < zarray_size_cuda(cluster); j++) {
+                    struct pt *p;
+                    zarray_get_volatile_cuda(cluster, j, &p);
+
+                    int x = p->x / 2;
+                    int y = p->y / 2;
+                    d->buf[y*d->stride + 3*x + 0] = r;
+                    d->buf[y*d->stride + 3*x + 1] = g;
+                    d->buf[y*d->stride + 3*x + 2] = b;
+                }
+            }
+            
+            uint32_t chash = compute_clusters_hash_cuda(clusters);
+            uint32_t dbg_hash = compute_image8x3_hash_cuda(d);
+            printf("GPU: gradient_cluster hash = 0x%X, dbg image hash = 0x%X\n", chash, dbg_hash);
+
+            *dbg = d;
+            // image_u8x3_write_pnm(d, "debug_clusters.pnm");
+            // image_u8x3_destroy(d);
+
+        }
+    }    
+
+    return NULL;
+
     if (threadIdx.x == 0) {
         image_u8_destroy_cuda(threshim);
     }
